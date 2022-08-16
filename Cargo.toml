@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "snowflake-fsp",
+    "winfsp-sys"
+]
