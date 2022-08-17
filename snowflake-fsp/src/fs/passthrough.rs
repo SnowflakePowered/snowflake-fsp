@@ -1,15 +1,11 @@
-use crate::fsp::{DropCloseHandle, FileSystemContext, FspFileSystem};
-use anyhow::anyhow;
-use std::cell::RefCell;
-use std::ffi::c_void;
 use std::fs;
 use std::io::ErrorKind;
-use std::mem::{ManuallyDrop, MaybeUninit};
-use std::ops::BitAnd;
+use std::mem::MaybeUninit;
+
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use windows::core::{Result, HSTRING, PWSTR};
+
+use windows::core::{Result, HSTRING};
 use windows::w;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, MAX_PATH};
 use windows::Win32::Security::{
@@ -18,19 +14,22 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, GetDiskFreeSpaceExW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetVolumePathNameA, GetVolumePathNameW,
-    BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    READ_CONTROL,
+    GetFileInformationByHandleEx, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION,
+    FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
 };
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
+
 use winfsp_sys::{
-    FspFileSystemCreate, FspFileSystemDeleteDirectoryBuffer, FSP_FILE_SYSTEM, FSP_FSCTL_FILE_INFO,
-    FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS, PVOID,
+    FspFileSystemDeleteDirectoryBuffer, FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO,
+    FSP_FSCTL_VOLUME_PARAMS, PVOID,
 };
 
+use crate::fsp::{DropCloseHandle, FileSystemContext, FspFileSystem};
+
 const ALLOCATION_UNIT: u16 = 4096;
+
 pub struct Ptfs {
     pub fs: FspFileSystem,
 }
@@ -135,7 +134,7 @@ impl FileSystemContext for PtfsContext {
         if let Some(descriptor_len) = descriptor_len {
             unsafe {
                 if !GetKernelObjectSecurity(
-                    handle.clone(),
+                    handle,
                     (OWNER_SECURITY_INFORMATION
                         | GROUP_SECURITY_INFORMATION
                         | DACL_SECURITY_INFORMATION)
@@ -205,8 +204,13 @@ impl FileSystemContext for PtfsContext {
                 return Err(GetLastError().into());
             }
 
-            if !GetDiskFreeSpaceExW(&HSTRING::from_wide(&root), std::ptr::null_mut(), &mut total_size, &mut free_size)
-                .as_bool()
+            if !GetDiskFreeSpaceExW(
+                &HSTRING::from_wide(&root),
+                std::ptr::null_mut(),
+                &mut total_size,
+                &mut free_size,
+            )
+            .as_bool()
             {
                 return Err(GetLastError().into());
             }
@@ -258,7 +262,7 @@ impl Ptfs {
         dbg!(HSTRING::from_wide(&volume_params.FileSystemName), fs_name);
         dbg!(HSTRING::from_wide(&volume_params.Prefix), prefix);
 
-        let mut context = PtfsContext {
+        let context = PtfsContext {
             path: canonical_path,
         };
 

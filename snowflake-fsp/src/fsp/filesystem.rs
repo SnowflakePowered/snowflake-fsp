@@ -1,25 +1,19 @@
-use std::borrow::Borrow;
-use std::ffi::{c_void, OsStr};
-use std::mem::MaybeUninit;
-use std::panic;
 use std::path::Path;
-use widestring::U16CStr;
-use windows::core::{HRESULT, HSTRING, PWSTR};
+
+use windows::core::Result as NtResult;
+use windows::core::HSTRING;
 use windows::w;
-use windows::Win32::Foundation::{
-    EXCEPTION_NONCONTINUABLE_EXCEPTION, NTSTATUS, STATUS_INVALID_DEVICE_REQUEST, STATUS_SUCCESS,
-};
+use windows::Win32::Foundation::{NTSTATUS, STATUS_INVALID_DEVICE_REQUEST};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_FLAGS_AND_ATTRIBUTES};
+use windows::Win32::Storage::FileSystem::FILE_ACCESS_FLAGS;
+
 use winfsp_sys::{
     FspFileSystemCreate, FspFileSystemSetMountPoint, FspFileSystemStartDispatcher,
     FspFileSystemStopDispatcher, FSP_FILE_SYSTEM, FSP_FILE_SYSTEM_INTERFACE, FSP_FSCTL_FILE_INFO,
     FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
-use winfsp_sys::{NTSTATUS as FSP_STATUS, PVOID};
 
 use crate::fsp::interface::Interface;
-use windows::core::Result as NtResult;
 
 pub struct FspFileSystem(pub *mut FSP_FILE_SYSTEM);
 impl FspFileSystem {
@@ -114,7 +108,7 @@ pub trait FileSystemContext: Sized {
 
     fn cleanup<P: AsRef<Path>>(&self, _context: &Self::FileContext, _file_name: P, _flags: u32) {}
 
-    fn get_volume_info(&self, out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> NtResult<()> {
+    fn get_volume_info(&self, _out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> NtResult<()> {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
     }
 }

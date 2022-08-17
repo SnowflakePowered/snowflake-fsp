@@ -1,22 +1,14 @@
-use std::borrow::Borrow;
-use std::ffi::{c_void, OsStr};
-use std::mem::MaybeUninit;
-use std::panic;
-use std::path::Path;
 use widestring::U16CStr;
-use windows::core::{HRESULT, HSTRING, PWSTR};
-use windows::w;
-use windows::Win32::Foundation::{
-    EXCEPTION_NONCONTINUABLE_EXCEPTION, NTSTATUS, STATUS_INVALID_DEVICE_REQUEST, STATUS_SUCCESS,
-};
+
+use windows::Win32::Foundation::{EXCEPTION_NONCONTINUABLE_EXCEPTION, STATUS_SUCCESS};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_FLAGS_AND_ATTRIBUTES};
+use windows::Win32::Storage::FileSystem::FILE_ACCESS_FLAGS;
+
 use winfsp_sys::{
-    FspFileSystemCreate, FspFileSystemSetMountPoint, FspFileSystemStartDispatcher,
-    FspFileSystemStopDispatcher, FSP_FILE_SYSTEM, FSP_FILE_SYSTEM_INTERFACE, FSP_FSCTL_FILE_INFO,
-    FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
+    FSP_FILE_SYSTEM, FSP_FILE_SYSTEM_INTERFACE, FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO,
 };
 use winfsp_sys::{NTSTATUS as FSP_STATUS, PVOID};
+
 use crate::fsp::FileSystemContext;
 
 /// Catch panic and return STATUS_INVALID_DISPOSITION
@@ -38,7 +30,8 @@ pub unsafe extern "C" fn get_volume_info<T: FileSystemContext>(
                 Ok(_) => {
                     dbg!(STATUS_SUCCESS);
                     STATUS_SUCCESS
-                }.into(),
+                }
+                .into(),
                 Err(e) => e.code(),
             }
             .0

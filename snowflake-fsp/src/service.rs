@@ -1,7 +1,7 @@
 use crate::fs::Ptfs;
 use crate::fsp::FspService;
 use crate::Args;
-use windows::core::{HSTRING, PWSTR};
+
 use windows::Win32::Foundation::{EXCEPTION_NONCONTINUABLE_EXCEPTION, NTSTATUS, STATUS_SUCCESS};
 
 #[inline]
@@ -21,6 +21,8 @@ pub fn svc_start(mut service: FspService<Ptfs>, args: Args) -> anyhow::Result<()
 pub fn svc_stop(mut service: FspService<Ptfs>) -> NTSTATUS {
     let context = service.get_context();
     context
-        .and_then(|f| Some(f.fs.stop()))
+        .map(|f| {
+            f.fs.stop();
+        })
         .map_or_else(|| EXCEPTION_NONCONTINUABLE_EXCEPTION, |_| STATUS_SUCCESS)
 }
