@@ -344,6 +344,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "widestring",
  "windows",
  "winfsp-sys",
 ]
@@ -402,6 +403,12 @@ dependencies = [
  "lazy_static",
  "libc",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "653f141f39ec16bba3c5abe400a0c60da7468261cc2cbf36805022876bc721a8"
 
 [[package]]
 name = "winapi"

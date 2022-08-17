@@ -11,13 +11,12 @@ use windows::Win32::Foundation::{ERROR_DELAY_LOAD_FAILED, STATUS_NOT_IMPLEMENTED
 use windows::Win32::System::LibraryLoader::LoadLibraryW;
 use winfsp_sys::*;
 
-
 unsafe extern "C" fn _svc_start(service: *mut FSP_SERVICE, argc: u32, argv: *mut *mut u16) -> i32 {
     let args = Args::parse();
 
     match service::svc_start(fsp::FspService::from_raw_unchecked(service), args) {
         Err(e) => STATUS_NOT_IMPLEMENTED.0,
-        Ok(_) => STATUS_SUCCESS.0
+        Ok(_) => STATUS_SUCCESS.0,
     }
 }
 

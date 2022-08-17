@@ -16,11 +16,7 @@ impl<T> FspService<T> {
         }
     }
 
-    pub fn get_context_mut(&mut self) -> Option<&mut T> {
+    pub fn get_context(&mut self) -> Option<&mut T> {
         unsafe { self.0.as_mut().UserContext.cast::<T>().as_mut() }
-    }
-
-    pub fn get_context(&mut self) -> Option<&T> {
-        unsafe { self.0.as_ref().UserContext.cast::<T>().as_ref() }
     }
 }

@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "3.2.17", features = ["derive"] }
-windows = { version = "0.39.0", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+windows = { version = "0.39.0", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Storage_FileSystem"] }
+widestring = "1"
 winfsp-sys = { path = "../winfsp-sys" }
 anyhow = "1"
