@@ -6,7 +6,7 @@ pub struct FspService<T>(pub NonNull<FSP_SERVICE>, PhantomData<T>);
 
 impl<T> FspService<T> {
     pub unsafe fn from_raw_unchecked(raw: *mut FSP_SERVICE) -> Self {
-        FspService(NonNull::new_unchecked(raw), Default::default())
+        unsafe { FspService(NonNull::new_unchecked(raw), Default::default()) }
     }
 
     pub fn set_context(&mut self, context: Box<T>) {
