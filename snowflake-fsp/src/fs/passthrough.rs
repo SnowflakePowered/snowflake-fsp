@@ -21,17 +21,17 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
 
-use winfsp_sys::{
-    FspFileSystemDeleteDirectoryBuffer, FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO,
-    FSP_FSCTL_VOLUME_PARAMS, PVOID,
+use winfsp::filesystem::{
+    DirBuffer, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO,
+    FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
 
-use crate::fsp::{DropCloseHandle, FileSystemContext, FspFileSystem};
+use winfsp::util::SafeDropHandle;
 
 const ALLOCATION_UNIT: u16 = 4096;
 
 pub struct Ptfs {
-    pub fs: FspFileSystem,
+    pub fs: FileSystemHost,
 }
 
 #[repr(C)]
@@ -42,7 +42,7 @@ pub struct PtfsContext {
 #[repr(C)]
 pub struct PtfsFileContext {
     handle: HANDLE,
-    dir_buffer: PVOID,
+    dir_buffer: DirBuffer,
 }
 
 #[inline(always)]
@@ -98,8 +98,8 @@ impl FileSystemContext for PtfsContext {
         &self,
         file_name: P,
         security_descriptor: PSECURITY_DESCRIPTOR,
-        descriptor_len: Option<u32>,
-    ) -> Result<(u32, u64)> {
+        security_descriptor_len: Option<u64>,
+    ) -> Result<FileSecurity> {
         let full_path = &self.path.join(file_name);
         let handle = unsafe {
             CreateFileW(
@@ -113,7 +113,7 @@ impl FileSystemContext for PtfsContext {
             )
         }?;
 
-        let handle = DropCloseHandle::from(handle);
+        let handle = SafeDropHandle::from(handle);
 
         let mut attribute_tag_info: MaybeUninit<FILE_ATTRIBUTE_TAG_INFO> = MaybeUninit::uninit();
         let mut len_needed: u32 = 0;
@@ -131,7 +131,7 @@ impl FileSystemContext for PtfsContext {
             }
         }
 
-        if let Some(descriptor_len) = descriptor_len {
+        if let Some(descriptor_len) = security_descriptor_len {
             unsafe {
                 if !GetKernelObjectSecurity(
                     handle,
@@ -140,7 +140,7 @@ impl FileSystemContext for PtfsContext {
                         | DACL_SECURITY_INFORMATION)
                         .0,
                     security_descriptor,
-                    descriptor_len,
+                    descriptor_len as u32,
                     &mut len_needed,
                 )
                 .as_bool()
@@ -150,9 +150,11 @@ impl FileSystemContext for PtfsContext {
             }
         }
 
-        let file_attributes = unsafe { attribute_tag_info.assume_init() }.FileAttributes;
-
-        Ok((file_attributes, len_needed as u64))
+        Ok(FileSecurity {
+            attributes: unsafe { attribute_tag_info.assume_init() }.FileAttributes,
+            reparse: false,
+            sz_security_descriptor: len_needed as u64,
+        })
     }
 
     fn open<P: AsRef<Path>>(
@@ -183,14 +185,14 @@ impl FileSystemContext for PtfsContext {
         self.get_file_info_internal(handle, file_info)?;
         Ok(Self::FileContext {
             handle,
-            dir_buffer: std::ptr::null_mut(),
+            dir_buffer: DirBuffer::new(),
         })
     }
 
-    fn close(&self, mut context: Self::FileContext) {
+    fn close(&self, context: Self::FileContext) {
         unsafe {
             CloseHandle(context.handle);
-            FspFileSystemDeleteDirectoryBuffer(&mut context.dir_buffer)
+            drop(context.dir_buffer)
         }
     }
 
@@ -268,7 +270,7 @@ impl Ptfs {
 
         unsafe {
             Ok(Box::new(Ptfs {
-                fs: FspFileSystem::new(volume_params, context)?,
+                fs: FileSystemHost::new(volume_params, context)?,
             }))
         }
     }

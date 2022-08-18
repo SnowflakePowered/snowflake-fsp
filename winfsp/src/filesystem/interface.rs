@@ -1,6 +1,8 @@
 use widestring::U16CStr;
 
-use windows::Win32::Foundation::{EXCEPTION_NONCONTINUABLE_EXCEPTION, STATUS_SUCCESS};
+use windows::Win32::Foundation::{
+    EXCEPTION_NONCONTINUABLE_EXCEPTION, STATUS_REPARSE, STATUS_SUCCESS,
+};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::Storage::FileSystem::FILE_ACCESS_FLAGS;
 
@@ -9,7 +11,7 @@ use winfsp_sys::{
 };
 use winfsp_sys::{NTSTATUS as FSP_STATUS, PVOID};
 
-use crate::fsp::FileSystemContext;
+use crate::filesystem::{FileSecurity, FileSystemContext};
 
 /// Catch panic and return STATUS_INVALID_DISPOSITION
 macro_rules! catch_panic {
@@ -56,16 +58,24 @@ pub unsafe extern "C" fn get_security_by_name<T: FileSystemContext>(
             context,
             file_name,
             PSECURITY_DESCRIPTOR(security_descriptor),
-            unsafe { file_attributes.as_ref() }.cloned(),
+            unsafe { sz_security_descriptor.as_ref() }.cloned(),
         ) {
-            Ok((attributes, len_desc)) => {
+            Ok(FileSecurity {
+                attributes,
+                reparse,
+                sz_security_descriptor: len_desc,
+            }) => {
                 if !file_attributes.is_null() {
                     unsafe { file_attributes.write(attributes) }
                 }
                 if !sz_security_descriptor.is_null() {
                     unsafe { sz_security_descriptor.write(len_desc) }
                 }
-                STATUS_SUCCESS.into()
+                if reparse {
+                    STATUS_REPARSE.into()
+                } else {
+                    STATUS_SUCCESS.into()
+                }
             }
             Err(e) => e.code(),
         }
@@ -117,6 +127,8 @@ pub unsafe extern "C" fn close<T: FileSystemContext>(fs: *mut FSP_FILE_SYSTEM, f
     });
 }
 
+
+
 pub struct Interface {
     get_volume_info: Option<
         unsafe extern "C" fn(
@@ -147,7 +159,7 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub(crate) fn create<T: FileSystemContext>() -> Self {
+    pub fn create<T: FileSystemContext>() -> Self {
         Interface {
             get_volume_info: Some(get_volume_info::<T>),
             close: Some(close::<T>),
@@ -157,13 +169,13 @@ impl Interface {
     }
 }
 
-impl Into<FSP_FILE_SYSTEM_INTERFACE> for Interface {
-    fn into(self) -> FSP_FILE_SYSTEM_INTERFACE {
+impl From<Interface> for FSP_FILE_SYSTEM_INTERFACE {
+    fn from(interface: Interface) -> Self {
         FSP_FILE_SYSTEM_INTERFACE {
-            GetVolumeInfo: self.get_volume_info,
-            Close: self.close,
-            Open: self.open,
-            GetSecurityByName: self.get_security_by_name,
+            GetVolumeInfo: interface.get_volume_info,
+            Close: interface.close,
+            Open: interface.open,
+            GetSecurityByName: interface.get_security_by_name,
             ..Default::default()
         }
     }

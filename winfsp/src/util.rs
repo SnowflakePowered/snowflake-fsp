@@ -2,9 +2,9 @@ use std::ops::Deref;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
 #[derive(Clone)]
-pub struct DropCloseHandle(HANDLE);
+pub struct SafeDropHandle(HANDLE);
 
-impl Drop for DropCloseHandle {
+impl Drop for SafeDropHandle {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.0);
@@ -12,7 +12,7 @@ impl Drop for DropCloseHandle {
     }
 }
 
-impl Deref for DropCloseHandle {
+impl Deref for SafeDropHandle {
     type Target = HANDLE;
 
     fn deref(&self) -> &Self::Target {
@@ -20,14 +20,14 @@ impl Deref for DropCloseHandle {
     }
 }
 
-impl From<HANDLE> for DropCloseHandle {
+impl From<HANDLE> for SafeDropHandle {
     fn from(h: HANDLE) -> Self {
         Self(h)
     }
 }
 
-impl From<DropCloseHandle> for HANDLE {
-    fn from(h: DropCloseHandle) -> Self {
+impl From<SafeDropHandle> for HANDLE {
+    fn from(h: SafeDropHandle) -> Self {
         h.0
     }
 }

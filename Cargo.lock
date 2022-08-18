@@ -346,6 +346,7 @@ dependencies = [
  "clap",
  "widestring",
  "windows",
+ "winfsp",
  "winfsp-sys",
 ]
 
@@ -483,6 +484,15 @@ name = "windows_x86_64_msvc"
 version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e4d40883ae9cae962787ca76ba76390ffa29214667a111db9e0a1ad8377e809"
+
+[[package]]
+name = "winfsp"
+version = "0.1.0"
+dependencies = [
+ "widestring",
+ "windows",
+ "winfsp-sys",
+]
 
 [[package]]
 name = "winfsp-sys"

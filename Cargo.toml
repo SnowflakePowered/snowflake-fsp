@@ -2,5 +2,6 @@
 
 members = [
     "snowflake-fsp",
+    "winfsp",
     "winfsp-sys"
 ]

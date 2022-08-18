@@ -1,7 +1,6 @@
 #![feature(io_error_more)]
 #![deny(unsafe_op_in_unsafe_fn)]
 mod fs;
-mod fsp;
 mod service;
 
 use clap::Parser;
@@ -11,6 +10,7 @@ use windows::Win32::Foundation::{
     ERROR_DELAY_LOAD_FAILED, EXCEPTION_NONCONTINUABLE_EXCEPTION, STATUS_SUCCESS,
 };
 use windows::Win32::System::LibraryLoader::LoadLibraryW;
+use winfsp::service::FileSystemService;
 use winfsp_sys::*;
 
 unsafe extern "C" fn _svc_start(
@@ -21,7 +21,7 @@ unsafe extern "C" fn _svc_start(
     let args = Args::parse();
 
     unsafe {
-        match service::svc_start(fsp::FspService::from_raw_unchecked(service), args) {
+        match service::svc_start(FileSystemService::from_raw_unchecked(service), args) {
             Err(_e) => EXCEPTION_NONCONTINUABLE_EXCEPTION.0,
             Ok(_) => STATUS_SUCCESS.0,
         }
@@ -29,7 +29,7 @@ unsafe extern "C" fn _svc_start(
 }
 
 unsafe extern "C" fn _svc_stop(service: *mut FSP_SERVICE) -> i32 {
-    unsafe { service::svc_stop(fsp::FspService::from_raw_unchecked(service)).0 }
+    unsafe { service::svc_stop(FileSystemService::from_raw_unchecked(service)).0 }
 }
 
 /// MainArgs
