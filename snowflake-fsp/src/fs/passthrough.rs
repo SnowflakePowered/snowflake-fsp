@@ -1,13 +1,14 @@
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::mem::MaybeUninit;
 
 use std::os::windows::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use windows::core::{Result, HSTRING};
 use windows::w;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, MAX_PATH};
+use windows::Win32::Foundation::{GetLastError, HANDLE, MAX_PATH};
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
@@ -29,6 +30,7 @@ use winfsp::filesystem::{
 use winfsp::util::SafeDropHandle;
 
 const ALLOCATION_UNIT: u16 = 4096;
+const VOLUME_LABEL: &HSTRING = w!("Snowflake");
 
 pub struct Ptfs {
     pub fs: FileSystemHost,
@@ -36,12 +38,12 @@ pub struct Ptfs {
 
 #[repr(C)]
 pub struct PtfsContext {
-    path: PathBuf,
+    path: OsString,
 }
 
 #[repr(C)]
 pub struct PtfsFileContext {
-    handle: HANDLE,
+    handle: SafeDropHandle,
     dir_buffer: DirBuffer,
 }
 
@@ -94,16 +96,16 @@ impl PtfsContext {
 impl FileSystemContext for PtfsContext {
     type FileContext = PtfsFileContext;
 
-    fn get_security_by_name<P: AsRef<Path>>(
+    fn get_security_by_name<P: AsRef<OsStr>>(
         &self,
         file_name: P,
         security_descriptor: PSECURITY_DESCRIPTOR,
         security_descriptor_len: Option<u64>,
     ) -> Result<FileSecurity> {
-        let full_path = &self.path.join(file_name);
+        let full_path = [self.path.as_os_str(), file_name.as_ref()].join(OsStr::new(""));
         let handle = unsafe {
             CreateFileW(
-                &HSTRING::from(full_path.as_os_str()),
+                &HSTRING::from(dbg!(full_path.as_os_str())),
                 FILE_READ_ATTRIBUTES | READ_CONTROL,
                 Default::default(),
                 std::ptr::null(),
@@ -113,14 +115,14 @@ impl FileSystemContext for PtfsContext {
             )
         }?;
 
-        let handle = SafeDropHandle::from(handle);
-
         let mut attribute_tag_info: MaybeUninit<FILE_ATTRIBUTE_TAG_INFO> = MaybeUninit::uninit();
         let mut len_needed: u32 = 0;
 
+        let handle = SafeDropHandle::from(handle);
+
         unsafe {
             if !GetFileInformationByHandleEx(
-                handle.clone(),
+                *handle,
                 FileAttributeTagInfo,
                 attribute_tag_info.as_mut_ptr() as *mut _,
                 std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
@@ -134,7 +136,7 @@ impl FileSystemContext for PtfsContext {
         if let Some(descriptor_len) = security_descriptor_len {
             unsafe {
                 if !GetKernelObjectSecurity(
-                    handle,
+                    *handle,
                     (OWNER_SECURITY_INFORMATION
                         | GROUP_SECURITY_INFORMATION
                         | DACL_SECURITY_INFORMATION)
@@ -157,14 +159,14 @@ impl FileSystemContext for PtfsContext {
         })
     }
 
-    fn open<P: AsRef<Path>>(
+    fn open<P: AsRef<OsStr>>(
         &self,
         file_name: P,
         create_options: u32,
         granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<Self::FileContext> {
-        let full_path = &self.path.join(file_name);
+        let full_path = [self.path.as_os_str(), file_name.as_ref()].join(OsStr::new(""));
         let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
         if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
             create_flags |= FILE_FLAG_DELETE_ON_CLOSE
@@ -184,16 +186,13 @@ impl FileSystemContext for PtfsContext {
 
         self.get_file_info_internal(handle, file_info)?;
         Ok(Self::FileContext {
-            handle,
+            handle: SafeDropHandle::from(handle),
             dir_buffer: DirBuffer::new(),
         })
     }
 
     fn close(&self, context: Self::FileContext) {
-        unsafe {
-            CloseHandle(context.handle);
-            drop(context.dir_buffer)
-        }
+        drop(context)
     }
 
     fn get_volume_info(&self, out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> Result<()> {
@@ -220,9 +219,9 @@ impl FileSystemContext for PtfsContext {
 
         out_volume_info.TotalSize = total_size;
         out_volume_info.FreeSize = free_size;
-        out_volume_info.VolumeLabel[0..4].copy_from_slice(w!("SFLK").as_wide());
-        out_volume_info.VolumeLabelLength = 4;
-        dbg!("get_volume_info", total_size, free_size);
+        out_volume_info.VolumeLabel[0..VOLUME_LABEL.len()].copy_from_slice(VOLUME_LABEL.as_wide());
+        out_volume_info.VolumeLabelLength =
+            (VOLUME_LABEL.len() * std::mem::size_of::<u16>()) as u16;
         Ok(())
     }
 }
@@ -265,7 +264,7 @@ impl Ptfs {
         dbg!(HSTRING::from_wide(&volume_params.Prefix), prefix);
 
         let context = PtfsContext {
-            path: canonical_path,
+            path: canonical_path.into_os_string(),
         };
 
         unsafe {
