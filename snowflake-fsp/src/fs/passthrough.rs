@@ -1,4 +1,3 @@
-
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
@@ -6,19 +5,23 @@ use std::mem::MaybeUninit;
 
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
-use widestring::{U16CStr, U16CString, u16cstr, U16String};
+use widestring::{u16cstr, U16CStr, U16CString, U16String};
 
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::w;
-use windows::Win32::Foundation::{
-    GetLastError, HANDLE, MAX_PATH,
-    STATUS_OBJECT_NAME_INVALID,
-};
+use windows::Win32::Foundation::{GetLastError, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID};
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
-use windows::Win32::Storage::FileSystem::{CreateFileW, FileAttributeTagInfo, FindFirstFileW, GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW, FindNextFileW, FindClose};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FileAttributeTagInfo, FindClose, FindFirstFileW, FindNextFileW,
+    GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    READ_CONTROL, WIN32_FIND_DATAW,
+};
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
 
 use winfsp::filesystem::{
@@ -169,6 +172,11 @@ impl FileSystemContext for PtfsContext {
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<Self::FileContext> {
         let full_path = [self.path.as_os_str(), file_name.as_ref()].join(OsStr::new(""));
+        if full_path.len() > FULLPATH_SIZE {
+            return Err(STATUS_OBJECT_NAME_INVALID.into());
+        }
+
+        let full_path = U16CString::from_os_str_truncate(full_path);
         let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
         if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
             create_flags |= FILE_FLAG_DELETE_ON_CLOSE
@@ -176,7 +184,7 @@ impl FileSystemContext for PtfsContext {
 
         let handle = unsafe {
             CreateFileW(
-                &HSTRING::from(full_path.as_os_str()),
+                PCWSTR(full_path.as_ptr()),
                 granted_access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 std::ptr::null(),
@@ -203,12 +211,13 @@ impl FileSystemContext for PtfsContext {
         let mut total_size = 0u64;
         let mut free_size = 0u64;
         unsafe {
-            if !GetVolumePathNameW(&HSTRING::from(self.path.as_os_str()), &mut root[..]).as_bool() {
+            let fname = U16CString::from_os_str_truncate(self.path.as_os_str());
+            if !GetVolumePathNameW(PCWSTR(fname.as_ptr()), &mut root[..]).as_bool() {
                 return Err(GetLastError().into());
             }
 
             if !GetDiskFreeSpaceExW(
-                &HSTRING::from_wide(&root),
+                PCWSTR(U16CStr::from_slice_truncate(&root).unwrap().as_ptr()),
                 std::ptr::null_mut(),
                 &mut total_size,
                 &mut free_size,
@@ -268,6 +277,7 @@ impl FileSystemContext for PtfsContext {
         marker: *const u16,
         buffer: &mut [u8],
     ) -> Result<u32> {
+        dbg!("read_dir");
         if let Ok(mut lock) = context.dir_buffer.acquire(marker.is_null(), None) {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
             let mut full_path = [0; FULLPATH_SIZE];
@@ -291,22 +301,21 @@ impl FileSystemContext for PtfsContext {
 
             // append '\'
             if full_path[length as usize - 1] != '\\' as u16 {
-                full_path[length as usize..][0..2].copy_from_slice(u16cstr!("\\").as_slice_with_nul());
+                full_path[length as usize..][0..2]
+                    .copy_from_slice(u16cstr!("\\").as_slice_with_nul());
                 length += 1;
             }
 
-            let mut full_path = unsafe { U16String::from_ptr(&full_path as *const u16,
-                                                         length as usize) };
+            let mut full_path =
+                unsafe { U16String::from_ptr(&full_path as *const u16, length as usize) };
 
             full_path.push(pattern);
 
             let mut find_data = MaybeUninit::<WIN32_FIND_DATAW>::uninit();
             let full_path = U16CString::from_ustr_truncate(full_path);
-            let find_handle = unsafe { FindFirstFileW(PCWSTR::from_raw(full_path.as_ptr()), find_data.as_mut_ptr())? };
-
-            if !find_handle.is_invalid() {
+            if let Ok(find_handle) = unsafe { FindFirstFileW(PCWSTR::from_raw(full_path.as_ptr()), find_data.as_mut_ptr()) } && !find_handle.is_invalid() {
                 let mut find_data = unsafe { find_data.assume_init() };
-                'next: loop {
+                loop {
                     dirinfo.reset();
                     let finfo = dirinfo.file_info_mut();
                     finfo.FileAttributes = find_data.dwFileAttributes;
@@ -319,35 +328,33 @@ impl FileSystemContext for PtfsContext {
                     finfo.ChangeTime = finfo.LastWriteTime;
                     finfo.HardLinks = 0;
                     finfo.IndexNumber = 0;
-
                     // safety: if this is null then something went very wrong with windows
                     let file_name = unsafe {
                         U16CStr::from_slice_truncate(&find_data.cFileName)
-                            .unwrap_unchecked()
+                            .unwrap()
                     };
-
                     dirinfo.set_file_name(file_name.as_slice_with_nul());
-
                     if let Err(e) = lock.fill(&mut dirinfo) {
                         unsafe {
                             FindClose(find_handle);
                         }
+                        drop(lock);
                         return Err(e);
                     }
-
                     if unsafe {
                         !FindNextFileW(HANDLE(find_handle.0), &mut find_data).as_bool()
                     } {
-                        break 'next
+                        break;
                     }
                 }
                 unsafe {
                     FindClose(find_handle);
                 }
+                drop(lock);
             }
         }
 
-       Ok(context.dir_buffer.read(marker, buffer))
+        Ok(context.dir_buffer.read(marker, buffer))
     }
 }
 
