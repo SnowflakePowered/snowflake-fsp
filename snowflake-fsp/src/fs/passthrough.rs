@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
@@ -6,12 +6,12 @@ use std::mem::MaybeUninit;
 
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
-use widestring::{u16str, U16CStr, U16CString, u16cstr, U16String, U16Str};
+use widestring::{U16CStr, U16CString, u16cstr, U16String};
 
-use windows::core::{Result, HSTRING, PCWSTR, PWSTR};
+use windows::core::{Result, HSTRING, PCWSTR};
 use windows::w;
 use windows::Win32::Foundation::{
-    GetLastError, HANDLE, MAX_PATH, STATUS_INSUFFICIENT_RESOURCES, STATUS_INSUFF_SERVER_RESOURCES,
+    GetLastError, HANDLE, MAX_PATH,
     STATUS_OBJECT_NAME_INVALID,
 };
 use windows::Win32::Security::{
@@ -261,14 +261,14 @@ impl FileSystemContext for PtfsContext {
         Ok(descriptor_size_needed as u64)
     }
 
-    fn read_directory<P: Into<PCWSTR>, M: Into<PWSTR>>(
+    fn read_directory<P: Into<PCWSTR>>(
         &self,
         context: &mut Self::FileContext,
         pattern: Option<P>,
-        marker: Option<M>,
+        marker: *const u16,
         buffer: &mut [u8],
     ) -> Result<u32> {
-        if let Ok(mut lock) = context.dir_buffer.acquire(marker.is_none(), None) {
+        if let Ok(mut lock) = context.dir_buffer.acquire(marker.is_null(), None) {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
             let mut full_path = [0; FULLPATH_SIZE];
 
