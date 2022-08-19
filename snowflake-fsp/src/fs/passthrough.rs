@@ -333,7 +333,7 @@ impl FileSystemContext for PtfsContext {
                         U16CStr::from_slice_truncate(&find_data.cFileName)
                             .unwrap()
                     };
-                    dirinfo.set_file_name(file_name.as_slice_with_nul());
+                    dirinfo.set_file_name(file_name.as_slice());
                     if let Err(e) = lock.fill(&mut dirinfo) {
                         unsafe {
                             FindClose(find_handle);
