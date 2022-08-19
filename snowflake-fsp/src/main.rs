@@ -1,5 +1,7 @@
 #![feature(io_error_more)]
 #![deny(unsafe_op_in_unsafe_fn)]
+extern crate core;
+
 mod fs;
 mod service;
 

@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
@@ -5,25 +6,23 @@ use std::mem::MaybeUninit;
 
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
+use widestring::{u16str, U16CStr, U16CString, u16cstr, U16String, U16Str};
 
-use windows::core::{Result, HSTRING};
+use windows::core::{Result, HSTRING, PCWSTR, PWSTR};
 use windows::w;
-use windows::Win32::Foundation::{GetLastError, HANDLE, MAX_PATH};
+use windows::Win32::Foundation::{
+    GetLastError, HANDLE, MAX_PATH, STATUS_INSUFFICIENT_RESOURCES, STATUS_INSUFF_SERVER_RESOURCES,
+    STATUS_OBJECT_NAME_INVALID,
+};
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, GetDiskFreeSpaceExW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION,
-    FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_DELETE_ON_CLOSE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
-};
+use windows::Win32::Storage::FileSystem::{CreateFileW, FileAttributeTagInfo, FindFirstFileW, GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW, FindNextFileW, FindClose};
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
 
 use winfsp::filesystem::{
-    DirBuffer, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO,
+    DirBuffer, DirInfo, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO,
     FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
 
@@ -31,6 +30,9 @@ use winfsp::util::SafeDropHandle;
 
 const ALLOCATION_UNIT: u16 = 4096;
 const VOLUME_LABEL: &HSTRING = w!("Snowflake");
+const FULLPATH_SIZE: usize = MAX_PATH as usize
+    + (winfsp::filesystem::constants::FSP_FSCTL_TRANSACT_PATH_SIZEMAX as usize
+        / std::mem::size_of::<u16>());
 
 pub struct Ptfs {
     pub fs: FileSystemHost,
@@ -105,7 +107,7 @@ impl FileSystemContext for PtfsContext {
         let full_path = [self.path.as_os_str(), file_name.as_ref()].join(OsStr::new(""));
         let handle = unsafe {
             CreateFileW(
-                &HSTRING::from(dbg!(full_path.as_os_str())),
+                &HSTRING::from(full_path.as_os_str()),
                 FILE_READ_ATTRIBUTES | READ_CONTROL,
                 Default::default(),
                 std::ptr::null(),
@@ -223,6 +225,129 @@ impl FileSystemContext for PtfsContext {
         out_volume_info.VolumeLabelLength =
             (VOLUME_LABEL.len() * std::mem::size_of::<u16>()) as u16;
         Ok(())
+    }
+
+    fn get_file_info(
+        &self,
+        context: &Self::FileContext,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> Result<()> {
+        self.get_file_info_internal(*context.handle, file_info)
+    }
+
+    fn get_security(
+        &self,
+        context: &Self::FileContext,
+        security_descriptor: PSECURITY_DESCRIPTOR,
+        descriptor_len: Option<u64>,
+    ) -> Result<u64> {
+        let mut descriptor_size_needed = 0;
+        unsafe {
+            if !GetKernelObjectSecurity(
+                *context.handle,
+                (OWNER_SECURITY_INFORMATION
+                    | GROUP_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION)
+                    .0,
+                security_descriptor,
+                descriptor_len.unwrap_or(0) as u32,
+                &mut descriptor_size_needed,
+            )
+            .as_bool()
+            {
+                return Err(GetLastError().into());
+            }
+        }
+        Ok(descriptor_size_needed as u64)
+    }
+
+    fn read_directory<P: Into<PCWSTR>, M: Into<PWSTR>>(
+        &self,
+        context: &mut Self::FileContext,
+        pattern: Option<P>,
+        marker: Option<M>,
+        buffer: &mut [u8],
+    ) -> Result<u32> {
+        if let Ok(mut lock) = context.dir_buffer.acquire(marker.is_none(), None) {
+            let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
+            let mut full_path = [0; FULLPATH_SIZE];
+
+            let pattern = pattern.map_or(PCWSTR::from(w!("*")), P::into);
+            let pattern = unsafe { U16CStr::from_ptr_str(pattern.0) };
+
+            let mut length = unsafe {
+                GetFinalPathNameByHandleW(
+                    *context.handle,
+                    &mut full_path[0..FULLPATH_SIZE - 1],
+                    FILE_NAME::default(),
+                )
+            };
+
+            if length == 0 {
+                return Err(unsafe { GetLastError() }.into());
+            } else if length as usize + 1 + pattern.len() >= FULLPATH_SIZE {
+                return Err(STATUS_OBJECT_NAME_INVALID.into());
+            }
+
+            // append '\'
+            if full_path[length as usize - 1] != '\\' as u16 {
+                full_path[length as usize..][0..2].copy_from_slice(u16cstr!("\\").as_slice_with_nul());
+                length += 1;
+            }
+
+            let mut full_path = unsafe { U16String::from_ptr(&full_path as *const u16,
+                                                         length as usize) };
+
+            full_path.push(pattern);
+
+            let mut find_data = MaybeUninit::<WIN32_FIND_DATAW>::uninit();
+            let full_path = U16CString::from_ustr_truncate(full_path);
+            let find_handle = unsafe { FindFirstFileW(PCWSTR::from_raw(full_path.as_ptr()), find_data.as_mut_ptr())? };
+
+            if !find_handle.is_invalid() {
+                let mut find_data = unsafe { find_data.assume_init() };
+                'next: loop {
+                    dirinfo.reset();
+                    let finfo = dirinfo.file_info_mut();
+                    finfo.FileAttributes = find_data.dwFileAttributes;
+                    finfo.ReparseTag = 0;
+                    finfo.FileSize = quadpart(find_data.nFileSizeHigh, find_data.nFileSizeLow);
+                    finfo.AllocationSize = ((finfo.FileSize + ALLOCATION_UNIT as u64 - 1) / ALLOCATION_UNIT as u64) * ALLOCATION_UNIT as u64;
+                    finfo.CreationTime = quadpart(find_data.ftCreationTime.dwHighDateTime, find_data.ftCreationTime.dwLowDateTime);
+                    finfo.LastAccessTime = quadpart(find_data.ftLastAccessTime.dwHighDateTime, find_data.ftLastAccessTime.dwLowDateTime);
+                    finfo.LastWriteTime = quadpart(find_data.ftLastWriteTime.dwHighDateTime, find_data.ftLastWriteTime.dwLowDateTime);
+                    finfo.ChangeTime = finfo.LastWriteTime;
+                    finfo.HardLinks = 0;
+                    finfo.IndexNumber = 0;
+
+                    // safety: if this is null then something went very wrong with windows
+                    let file_name = unsafe {
+                        U16CStr::from_slice_truncate(&find_data.cFileName)
+                            .unwrap_unchecked()
+                    };
+
+                    dirinfo.set_file_name(file_name.as_slice_with_nul());
+
+                    if let Err(e) = lock.fill(&mut dirinfo) {
+                        unsafe {
+                            FindClose(find_handle);
+                        }
+                        return Err(e);
+                    }
+
+                    if unsafe {
+                        !FindNextFileW(HANDLE(find_handle.0), &mut find_data).as_bool()
+                    } {
+                        break 'next
+                    }
+                }
+                unsafe {
+                    FindClose(find_handle);
+                }
+            }
+        }
+
+       Ok(context.dir_buffer.read(marker, buffer))
     }
 }
 
