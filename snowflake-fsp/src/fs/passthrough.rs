@@ -274,11 +274,11 @@ impl FileSystemContext for PtfsContext {
         &self,
         context: &mut Self::FileContext,
         pattern: Option<P>,
-        marker: *const u16,
+        marker: Option<&[u16]>,
         buffer: &mut [u8],
     ) -> Result<u32> {
         dbg!("read_dir");
-        if let Ok(mut lock) = context.dir_buffer.acquire(marker.is_null(), None) {
+        if let Ok(mut lock) = context.dir_buffer.acquire(marker.is_none(), None) {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
             let mut full_path = [0; FULLPATH_SIZE];
 
