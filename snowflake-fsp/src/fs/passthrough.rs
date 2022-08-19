@@ -17,16 +17,17 @@ use windows::Win32::Security::{
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FindClose, FindFirstFileW, FindNextFileW,
     GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    READ_CONTROL, WIN32_FIND_DATAW,
+    GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, BY_HANDLE_FILE_INFORMATION,
+    FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
+use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
 use winfsp::filesystem::{
-    DirBuffer, DirInfo, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO,
-    FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
+    DirBuffer, DirInfo, FileSecurity, FileSystemContext, FileSystemHost, IoResult,
+    FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
 
 use winfsp::util::SafeDropHandle;
@@ -351,6 +352,42 @@ impl FileSystemContext for PtfsContext {
         }
 
         Ok(context.dir_buffer.read(marker, buffer))
+    }
+
+    fn read(
+        &self,
+        context: &Self::FileContext,
+        buffer: &mut [u8],
+        offset: u64,
+    ) -> Result<IoResult> {
+        let mut overlapped = OVERLAPPED {
+            Anonymous: OVERLAPPED_0 {
+                Anonymous: OVERLAPPED_0_0 {
+                    Offset: offset as u32,
+                    OffsetHigh: (offset >> 32) as u32,
+                },
+            },
+            ..Default::default()
+        };
+
+        let mut bytes_read = 0;
+        if unsafe {
+            !ReadFile(
+                *context.handle,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as u32,
+                &mut bytes_read,
+                &mut overlapped,
+            )
+            .as_bool()
+        } {
+            return Err(unsafe { GetLastError() }.into());
+        }
+
+        Ok(IoResult {
+            bytes_transferred: bytes_read,
+            io_pending: false,
+        })
     }
 }
 
