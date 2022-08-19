@@ -328,12 +328,8 @@ impl FileSystemContext for PtfsContext {
                     finfo.ChangeTime = finfo.LastWriteTime;
                     finfo.HardLinks = 0;
                     finfo.IndexNumber = 0;
-                    // safety: if this is null then something went very wrong with windows
-                    let file_name = unsafe {
-                        U16CStr::from_slice_truncate(&find_data.cFileName)
-                            .unwrap()
-                    };
-                    dirinfo.set_file_name(file_name.as_slice());
+
+                    dirinfo.set_file_name(&find_data.cFileName[..])?;
                     if let Err(e) = lock.fill(&mut dirinfo) {
                         unsafe {
                             FindClose(find_handle);
