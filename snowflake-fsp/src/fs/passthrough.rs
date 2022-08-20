@@ -9,15 +9,17 @@ use widestring::{u16cstr, U16CStr, U16CString, U16String};
 
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::w;
-use windows::Win32::Foundation::{GetLastError, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID};
+use windows::Win32::Foundation::{
+    GetLastError, HANDLE, MAX_PATH, STATUS_INVALID_DEVICE_REQUEST, STATUS_OBJECT_NAME_INVALID,
+};
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FindClose, FindFirstFileW, FindNextFileW,
-    GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, BY_HANDLE_FILE_INFORMATION,
+    GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
+    GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION,
     FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
@@ -386,6 +388,64 @@ impl FileSystemContext for PtfsContext {
 
         Ok(IoResult {
             bytes_transferred: bytes_read,
+            io_pending: false,
+        })
+    }
+
+    fn write(
+        &self,
+        context: &Self::FileContext,
+        mut buffer: &[u8],
+        offset: u64,
+        write_to_eof: bool,
+        constrained_io: bool,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> Result<IoResult> {
+        if constrained_io {
+            let mut fsize = 0;
+            if unsafe { !GetFileSizeEx(*context.handle, &mut fsize).as_bool() } {
+                return Err(unsafe { GetLastError() }.into());
+            }
+
+            if offset >= fsize as u64 {
+                return Ok(IoResult {
+                    bytes_transferred: 0,
+                    io_pending: false,
+                });
+            }
+
+            if offset + buffer.len() as u64 > fsize as u64 {
+                buffer = &buffer[0..(fsize as u64 - offset) as usize]
+            }
+        }
+
+        let mut overlapped = OVERLAPPED {
+            Anonymous: OVERLAPPED_0 {
+                Anonymous: OVERLAPPED_0_0 {
+                    Offset: offset as u32,
+                    OffsetHigh: (offset >> 32) as u32,
+                },
+            },
+            ..Default::default()
+        };
+
+        let mut bytes_transferred = 0;
+        if unsafe {
+            !WriteFile(
+                *context.handle,
+                buffer.as_ptr().cast(),
+                buffer.len() as u32,
+                &mut bytes_transferred,
+                &mut overlapped,
+            )
+            .as_bool()
+        } {
+            return Err(unsafe { GetLastError() }.into());
+        }
+
+        self.get_file_info_internal(*context.handle, file_info)?;
+        Ok(IoResult {
+            bytes_transferred,
             io_pending: false,
         })
     }
