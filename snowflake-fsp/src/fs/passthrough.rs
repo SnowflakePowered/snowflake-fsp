@@ -2,6 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::mem::MaybeUninit;
+use std::ops::BitXor;
 
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
@@ -10,19 +11,21 @@ use widestring::{u16cstr, U16CStr, U16CString, U16String};
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::w;
 use windows::Win32::Foundation::{
-    GetLastError, HANDLE, MAX_PATH, STATUS_INVALID_DEVICE_REQUEST, STATUS_OBJECT_NAME_INVALID,
+    GetLastError, BOOL, HANDLE, MAX_PATH, STATUS_INVALID_DEVICE_REQUEST, STATUS_OBJECT_NAME_INVALID,
 };
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, FindClose, FindFirstFileW, FindNextFileW,
-    GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
-    GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION,
-    FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
+    CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FindClose,
+    FindFirstFileW, FindNextFileW, GetDiskFreeSpaceExW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, GetVolumePathNameW,
+    ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS,
+    FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
@@ -58,6 +61,14 @@ pub struct PtfsFileContext {
 #[inline(always)]
 const fn quadpart(hi: u32, lo: u32) -> u64 {
     (hi as u64) << 32 | lo as u64
+}
+
+macro_rules! win32_try {
+    (unsafe $e:expr) => {
+        if unsafe { !(e).as_bool() } {
+            return Err(unsafe { GetLastError() }.into());
+        }
+    };
 }
 
 impl PtfsContext {
@@ -448,6 +459,81 @@ impl FileSystemContext for PtfsContext {
             bytes_transferred,
             io_pending: false,
         })
+    }
+
+    fn overwrite(
+        &self,
+        context: &Self::FileContext,
+        file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
+        replace_file_attributes: bool,
+        _allocation_size: u64,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> Result<()> {
+        let mut attribute_tag_info = FILE_ATTRIBUTE_TAG_INFO::default();
+
+        if replace_file_attributes {
+            let mut basic_info = FILE_BASIC_INFO::default();
+            basic_info.FileAttributes = if file_attributes == FILE_FLAGS_AND_ATTRIBUTES(0) {
+                FILE_ATTRIBUTE_NORMAL
+            } else {
+                file_attributes
+            }
+            .0;
+
+            if unsafe {
+                !SetFileInformationByHandle(
+                    *context.handle,
+                    FileBasicInfo,
+                    (&basic_info as *const FILE_BASIC_INFO).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+                .as_bool()
+            } {
+                return Err(unsafe { GetLastError().into() });
+            }
+        } else if file_attributes != FILE_FLAGS_AND_ATTRIBUTES(0) {
+            let mut basic_info = FILE_BASIC_INFO::default();
+            if unsafe {
+                !GetFileInformationByHandleEx(
+                    *context.handle,
+                    FileAttributeTagInfo,
+                    (&mut attribute_tag_info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                    std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+                )
+                .as_bool()
+            } {
+                return Err(unsafe { GetLastError().into() });
+            }
+
+            basic_info.FileAttributes = file_attributes.0 | attribute_tag_info.FileAttributes;
+            if basic_info.FileAttributes.bitxor(file_attributes.0) != 0 {
+                if unsafe {
+                    !SetFileInformationByHandle(
+                        *context.handle,
+                        FileBasicInfo,
+                        (&basic_info as *const FILE_BASIC_INFO).cast(),
+                        std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                    )
+                    .as_bool()
+                } {
+                    return Err(unsafe { GetLastError().into() });
+                }
+            }
+        }
+
+        let alloc_info = FILE_ALLOCATION_INFO::default();
+        if unsafe {
+            !SetFileInformationByHandle(
+                *context.handle,
+                FileAllocationInfo,
+                (&alloc_info as *const FILE_ALLOCATION_INFO).cast(),
+                std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
+            )
+            .as_bool()
+        } {
+            return Err(unsafe { GetLastError().into() });
+        }
+        return self.get_file_info_internal(*context.handle, file_info);
     }
 }
 
