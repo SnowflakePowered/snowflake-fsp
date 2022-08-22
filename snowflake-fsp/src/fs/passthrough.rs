@@ -2,7 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::mem::MaybeUninit;
-use std::ops::{BitXor};
+use std::ops::BitXor;
 
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
@@ -11,13 +11,27 @@ use widestring::{u16cstr, U16CStr, U16CString, U16String};
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::w;
 use windows::Win32::Foundation::{
-    GetLastError, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
+    CloseHandle, GetLastError, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
 };
-use windows::Win32::Security::{GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::{CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FindClose, FindFirstFileW, FindNextFileW, GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW, FILE_FLAG_POSIX_SEMANTICS, FILE_ATTRIBUTE_DIRECTORY, CREATE_NEW};
+use windows::Win32::Security::{
+    GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FindClose,
+    FindFirstFileW, FindNextFileW, GetDiskFreeSpaceExW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, GetVolumePathNameW,
+    ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
+    FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_NAME,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    READ_CONTROL, WIN32_FIND_DATAW,
+};
 use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
+use winfsp::filesystem::constants::FspCleanupFlags;
 use winfsp::filesystem::{
     DirBuffer, DirInfo, FileSecurity, FileSystemContext, FileSystemHost, IoResult,
     FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
@@ -484,7 +498,7 @@ impl FileSystemContext for PtfsContext {
         let security_attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: security_descriptor.0,
-            bInheritHandle: false.into()
+            bInheritHandle: false.into(),
         };
 
         let full_path = U16CString::from_os_str_truncate(full_path);
@@ -517,14 +531,20 @@ impl FileSystemContext for PtfsContext {
         }?;
 
         if handle.is_invalid() {
-            return Err(unsafe { GetLastError().into() })
+            return Err(unsafe { GetLastError().into() });
         }
         self.get_file_info_internal(handle, file_info)?;
 
         Ok(Self::FileContext {
             handle: SafeDropHandle::from(handle),
-            dir_buffer: Default::default()
+            dir_buffer: Default::default(),
         })
+    }
+
+    fn cleanup<P: AsRef<OsStr>>(&self, context: &mut Self::FileContext, file_name: P, flags: u32) {
+        if flags & FspCleanupFlags::FspCleanupDelete as u32 != 0 {
+            context.handle.invalidate();
+        }
     }
 }
 

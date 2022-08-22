@@ -10,9 +10,9 @@ pub fn svc_start(mut service: FileSystemService<Ptfs>, args: Args) -> anyhow::Re
         &args.directory,
         &args.volume_prefix.unwrap_or(String::from("")),
     )?;
+
     ptfs.fs.mount(args.mountpoint.as_os_str())?;
     ptfs.fs.start()?;
-
     service.set_context(ptfs);
     Ok(())
 }
