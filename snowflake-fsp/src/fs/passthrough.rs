@@ -65,7 +65,7 @@ const fn quadpart(hi: u32, lo: u32) -> u64 {
 
 macro_rules! win32_try {
     (unsafe $e:expr) => {
-        if unsafe { !(e).as_bool() } {
+        if unsafe { !($e).as_bool() } {
             return Err(unsafe { GetLastError() }.into());
         }
     };
@@ -78,11 +78,7 @@ impl PtfsContext {
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<()> {
         let mut os_file_info: BY_HANDLE_FILE_INFORMATION = Default::default();
-        unsafe {
-            if !GetFileInformationByHandle(file_handle, &mut os_file_info).as_bool() {
-                return Err(GetLastError().into());
-            }
-        }
+        win32_try!(unsafe GetFileInformationByHandle(file_handle, &mut os_file_info));
 
         file_info.FileAttributes = os_file_info.dwFileAttributes;
 
@@ -139,36 +135,24 @@ impl FileSystemContext for PtfsContext {
 
         let handle = SafeDropHandle::from(handle);
 
-        unsafe {
-            if !GetFileInformationByHandleEx(
-                *handle,
-                FileAttributeTagInfo,
-                attribute_tag_info.as_mut_ptr() as *mut _,
-                std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-            )
-            .as_bool()
-            {
-                return Err(GetLastError().into());
-            }
-        }
+        win32_try!(unsafe GetFileInformationByHandleEx(
+            *handle,
+            FileAttributeTagInfo,
+            attribute_tag_info.as_mut_ptr() as *mut _,
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        ));
 
         if let Some(descriptor_len) = security_descriptor_len {
-            unsafe {
-                if !GetKernelObjectSecurity(
-                    *handle,
-                    (OWNER_SECURITY_INFORMATION
-                        | GROUP_SECURITY_INFORMATION
-                        | DACL_SECURITY_INFORMATION)
-                        .0,
-                    security_descriptor,
-                    descriptor_len as u32,
-                    &mut len_needed,
-                )
-                .as_bool()
-                {
-                    return Err(GetLastError().into());
-                }
-            }
+            win32_try!(unsafe GetKernelObjectSecurity(
+                *handle,
+                (OWNER_SECURITY_INFORMATION
+                    | GROUP_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION)
+                    .0,
+                security_descriptor,
+                descriptor_len as u32,
+                &mut len_needed,
+            ));
         }
 
         Ok(FileSecurity {
@@ -224,23 +208,14 @@ impl FileSystemContext for PtfsContext {
         let mut root = [0u16; MAX_PATH as usize];
         let mut total_size = 0u64;
         let mut free_size = 0u64;
-        unsafe {
-            let fname = U16CString::from_os_str_truncate(self.path.as_os_str());
-            if !GetVolumePathNameW(PCWSTR(fname.as_ptr()), &mut root[..]).as_bool() {
-                return Err(GetLastError().into());
-            }
-
-            if !GetDiskFreeSpaceExW(
-                PCWSTR(U16CStr::from_slice_truncate(&root).unwrap().as_ptr()),
-                std::ptr::null_mut(),
-                &mut total_size,
-                &mut free_size,
-            )
-            .as_bool()
-            {
-                return Err(GetLastError().into());
-            }
-        }
+        let fname = U16CString::from_os_str_truncate(self.path.as_os_str());
+        win32_try!(unsafe GetVolumePathNameW(PCWSTR(fname.as_ptr()), &mut root[..]));
+        win32_try!(unsafe GetDiskFreeSpaceExW(
+            PCWSTR(U16CStr::from_slice_truncate(&root).unwrap().as_ptr()),
+            std::ptr::null_mut(),
+            &mut total_size,
+            &mut free_size,
+        ));
 
         out_volume_info.TotalSize = total_size;
         out_volume_info.FreeSize = free_size;
@@ -265,22 +240,17 @@ impl FileSystemContext for PtfsContext {
         descriptor_len: Option<u64>,
     ) -> Result<u64> {
         let mut descriptor_size_needed = 0;
-        unsafe {
-            if !GetKernelObjectSecurity(
-                *context.handle,
-                (OWNER_SECURITY_INFORMATION
-                    | GROUP_SECURITY_INFORMATION
-                    | DACL_SECURITY_INFORMATION)
-                    .0,
-                security_descriptor,
-                descriptor_len.unwrap_or(0) as u32,
-                &mut descriptor_size_needed,
-            )
-            .as_bool()
-            {
-                return Err(GetLastError().into());
-            }
-        }
+        win32_try!(unsafe GetKernelObjectSecurity(
+            *context.handle,
+            (OWNER_SECURITY_INFORMATION
+                | GROUP_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION)
+                .0,
+            security_descriptor,
+            descriptor_len.unwrap_or(0) as u32,
+            &mut descriptor_size_needed,
+        ));
+
         Ok(descriptor_size_needed as u64)
     }
 
@@ -384,18 +354,13 @@ impl FileSystemContext for PtfsContext {
         };
 
         let mut bytes_read = 0;
-        if unsafe {
-            !ReadFile(
-                *context.handle,
-                buffer.as_mut_ptr() as *mut _,
-                buffer.len() as u32,
-                &mut bytes_read,
-                &mut overlapped,
-            )
-            .as_bool()
-        } {
-            return Err(unsafe { GetLastError() }.into());
-        }
+        win32_try!(unsafe ReadFile(
+            *context.handle,
+            buffer.as_mut_ptr() as *mut _,
+            buffer.len() as u32,
+            &mut bytes_read,
+            &mut overlapped,
+        ));
 
         Ok(IoResult {
             bytes_transferred: bytes_read,
@@ -408,15 +373,13 @@ impl FileSystemContext for PtfsContext {
         context: &Self::FileContext,
         mut buffer: &[u8],
         offset: u64,
-        write_to_eof: bool,
+        _write_to_eof: bool,
         constrained_io: bool,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<IoResult> {
         if constrained_io {
             let mut fsize = 0;
-            if unsafe { !GetFileSizeEx(*context.handle, &mut fsize).as_bool() } {
-                return Err(unsafe { GetLastError() }.into());
-            }
+            win32_try!(unsafe GetFileSizeEx(*context.handle, &mut fsize));
 
             if offset >= fsize as u64 {
                 return Ok(IoResult {
@@ -441,18 +404,13 @@ impl FileSystemContext for PtfsContext {
         };
 
         let mut bytes_transferred = 0;
-        if unsafe {
-            !WriteFile(
-                *context.handle,
-                buffer.as_ptr().cast(),
-                buffer.len() as u32,
-                &mut bytes_transferred,
-                &mut overlapped,
-            )
-            .as_bool()
-        } {
-            return Err(unsafe { GetLastError() }.into());
-        }
+        win32_try!(unsafe WriteFile(
+            *context.handle,
+            buffer.as_ptr().cast(),
+            buffer.len() as u32,
+            &mut bytes_transferred,
+            &mut overlapped,
+        ));
 
         self.get_file_info_internal(*context.handle, file_info)?;
         Ok(IoResult {
@@ -480,59 +438,39 @@ impl FileSystemContext for PtfsContext {
             }
             .0;
 
-            if unsafe {
-                !SetFileInformationByHandle(
+            win32_try!(unsafe SetFileInformationByHandle(
+                *context.handle,
+                FileBasicInfo,
+                (&basic_info as *const FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            ));
+        } else if file_attributes != FILE_FLAGS_AND_ATTRIBUTES(0) {
+            let mut basic_info = FILE_BASIC_INFO::default();
+            win32_try!(unsafe GetFileInformationByHandleEx(
+                *context.handle,
+                FileAttributeTagInfo,
+                (&mut attribute_tag_info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            ));
+
+            basic_info.FileAttributes = file_attributes.0 | attribute_tag_info.FileAttributes;
+            if basic_info.FileAttributes.bitxor(file_attributes.0) != 0 {
+                win32_try!(unsafe SetFileInformationByHandle(
                     *context.handle,
                     FileBasicInfo,
                     (&basic_info as *const FILE_BASIC_INFO).cast(),
                     std::mem::size_of::<FILE_BASIC_INFO>() as u32,
-                )
-                .as_bool()
-            } {
-                return Err(unsafe { GetLastError().into() });
-            }
-        } else if file_attributes != FILE_FLAGS_AND_ATTRIBUTES(0) {
-            let mut basic_info = FILE_BASIC_INFO::default();
-            if unsafe {
-                !GetFileInformationByHandleEx(
-                    *context.handle,
-                    FileAttributeTagInfo,
-                    (&mut attribute_tag_info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-                    std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-                )
-                .as_bool()
-            } {
-                return Err(unsafe { GetLastError().into() });
-            }
-
-            basic_info.FileAttributes = file_attributes.0 | attribute_tag_info.FileAttributes;
-            if basic_info.FileAttributes.bitxor(file_attributes.0) != 0 {
-                if unsafe {
-                    !SetFileInformationByHandle(
-                        *context.handle,
-                        FileBasicInfo,
-                        (&basic_info as *const FILE_BASIC_INFO).cast(),
-                        std::mem::size_of::<FILE_BASIC_INFO>() as u32,
-                    )
-                    .as_bool()
-                } {
-                    return Err(unsafe { GetLastError().into() });
-                }
+                ));
             }
         }
 
         let alloc_info = FILE_ALLOCATION_INFO::default();
-        if unsafe {
-            !SetFileInformationByHandle(
-                *context.handle,
-                FileAllocationInfo,
-                (&alloc_info as *const FILE_ALLOCATION_INFO).cast(),
-                std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
-            )
-            .as_bool()
-        } {
-            return Err(unsafe { GetLastError().into() });
-        }
+        win32_try!(unsafe SetFileInformationByHandle(
+            *context.handle,
+            FileAllocationInfo,
+            (&alloc_info as *const FILE_ALLOCATION_INFO).cast(),
+            std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
+        ));
         return self.get_file_info_internal(*context.handle, file_info);
     }
 }
