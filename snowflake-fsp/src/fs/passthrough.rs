@@ -13,19 +13,17 @@ use windows::w;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
 };
-use windows::Win32::Security::{
-    GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
-};
+use windows::Win32::Security::{GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SetKernelObjectSecurity};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FindClose,
-    FindFirstFileW, FindNextFileW, GetDiskFreeSpaceExW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, GetVolumePathNameW,
-    ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
-    FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_NAME,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FileEndOfFileInfo,
+    FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers, GetDiskFreeSpaceExW,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
+    GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, SetFileInformationByHandle, WriteFile,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
+    FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_NAME, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
     READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
@@ -545,6 +543,100 @@ impl FileSystemContext for PtfsContext {
         if flags & FspCleanupFlags::FspCleanupDelete as u32 != 0 {
             context.handle.invalidate();
         }
+    }
+
+    fn set_basic_info(
+        &self,
+        context: &Self::FileContext,
+        file_attributes: u32,
+        creation_time: u64,
+        last_access_time: u64,
+        last_write_time: u64,
+        last_change_time: u64,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> Result<()> {
+        let basic_info = FILE_BASIC_INFO {
+            FileAttributes: if file_attributes == INVALID_FILE_ATTRIBUTES {
+                0
+            } else if file_attributes == 0 {
+                FILE_ATTRIBUTE_NORMAL.0
+            } else {
+                file_attributes
+            },
+            CreationTime: creation_time as i64,
+            LastAccessTime: last_access_time as i64,
+            LastWriteTime: last_write_time as i64,
+            ChangeTime: last_change_time as i64,
+            ..Default::default()
+        };
+        win32_try!(unsafe SetFileInformationByHandle(
+            *context.handle,
+            FileBasicInfo,
+            (&basic_info as *const FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        ));
+
+        self.get_file_info_internal(*context.handle, file_info)
+    }
+
+    fn set_file_size(
+        &self,
+        context: &Self::FileContext,
+        new_size: u64,
+        set_allocation_size: bool,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> Result<()> {
+        if set_allocation_size {
+            let allocation_info = FILE_ALLOCATION_INFO {
+                AllocationSize: new_size as i64,
+            };
+
+            win32_try!(unsafe SetFileInformationByHandle(
+                *context.handle,
+                FileAllocationInfo,
+                (&allocation_info as *const FILE_ALLOCATION_INFO).cast(),
+                std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32
+            ))
+        } else {
+            let eof_info = FILE_END_OF_FILE_INFO {
+                EndOfFile: new_size as i64,
+            };
+
+            win32_try!(unsafe SetFileInformationByHandle(
+                *context.handle,
+                FileEndOfFileInfo,
+                (&eof_info as *const FILE_END_OF_FILE_INFO).cast(),
+                std::mem::size_of::<FILE_END_OF_FILE_INFO>() as u32
+            ))
+        }
+        self.get_file_info_internal(*context.handle, file_info)
+    }
+
+    fn set_security(
+        &self,
+        context: &Self::FileContext,
+        security_information: u32,
+        modification_descriptor: PSECURITY_DESCRIPTOR,
+    ) -> Result<()> {
+        win32_try!(unsafe SetKernelObjectSecurity(
+            *context.handle,
+            security_information,
+            modification_descriptor
+        ));
+        Ok(())
+    }
+    fn flush(
+        &self,
+        context: &Self::FileContext,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> Result<()> {
+        if *context.handle == HANDLE(0) {
+            // we do not flush the whole volume, so just return ok
+            return Ok(());
+        }
+
+        win32_try!(unsafe FlushFileBuffers(*context.handle));
+        self.get_file_info_internal(*context.handle, file_info)
     }
 }
 
