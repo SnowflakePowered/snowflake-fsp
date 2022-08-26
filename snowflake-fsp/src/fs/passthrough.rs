@@ -11,20 +11,24 @@ use widestring::{u16cstr, U16CStr, U16CString, U16String};
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::w;
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
+    CloseHandle, GetLastError, BOOLEAN, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
 };
-use windows::Win32::Security::{GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SetKernelObjectSecurity};
+use windows::Win32::Security::{
+    GetKernelObjectSecurity, SetKernelObjectSecurity, DACL_SECURITY_INFORMATION,
+    GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    SECURITY_ATTRIBUTES,
+};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FileEndOfFileInfo,
-    FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers, GetDiskFreeSpaceExW,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
+    CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
+    FileEndOfFileInfo, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers,
+    GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
     GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, SetFileInformationByHandle, WriteFile,
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
-    FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_NAME, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
-    READ_CONTROL, WIN32_FIND_DATAW,
+    FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_NAME,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
@@ -625,6 +629,21 @@ impl FileSystemContext for PtfsContext {
         ));
         Ok(())
     }
+    fn set_delete<P: AsRef<OsStr>>(
+        &self,
+        context: &Self::FileContext,
+        file_name: P,
+        delete_file: bool,
+    ) -> Result<()> {
+        let mut disposition_info = FILE_DISPOSITION_INFO::default();
+        disposition_info.DeleteFileA = BOOLEAN(if delete_file { 1 } else { 0 });
+
+        win32_try!(unsafe SetFileInformationByHandle(*context.handle,
+            FileDispositionInfo, (&disposition_info as *const FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32));
+        Ok(())
+    }
+
     fn flush(
         &self,
         context: &Self::FileContext,
