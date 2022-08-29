@@ -301,6 +301,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptfs-winfsp-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "widestring",
+ "windows",
+ "winfsp",
+ "winfsp-sys",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -339,11 +351,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43b2853a4d09f215c24cc5489c992ce46052d359b5109343cbafbf26bc62f8a3"
 
 [[package]]
-name = "snowflake-fsp"
+name = "snowflake-projfs"
+version = "0.1.0"
+
+[[package]]
+name = "snowflake-projfs-common"
+version = "0.1.0"
+dependencies = [
+ "nom",
+]
+
+[[package]]
+name = "snowflake-projfs-fsp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "widestring",
  "windows",
  "winfsp",

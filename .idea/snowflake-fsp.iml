@@ -2,10 +2,13 @@
 <module type="CPP_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
-      <sourceFolder url="file://$MODULE_DIR$/snowflake-fsp/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/winfsp-sys/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/winfsp/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/ptfs-winfsp-rs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/snowflake-projfs-common/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/snowflake-projfs-fsp/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/snowflake-projfs/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

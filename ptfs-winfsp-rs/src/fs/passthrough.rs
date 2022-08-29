@@ -22,13 +22,14 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileAllocationInfo, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
     FileEndOfFileInfo, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers,
     GetDiskFreeSpaceExW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
-    GetFinalPathNameByHandleW, GetVolumePathNameW, ReadFile, SetFileInformationByHandle, WriteFile,
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
-    FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_NAME,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
+    GetFinalPathNameByHandleW, GetVolumePathNameW, MoveFileExW, ReadFile,
+    SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
+    FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+    FILE_FLAG_POSIX_SEMANTICS, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS,
+    OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
@@ -174,6 +175,8 @@ impl FileSystemContext for PtfsContext {
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<Self::FileContext> {
         dbg!("open");
+        dbg!(file_name.as_ref());
+
         let full_path = [self.path.as_os_str(), file_name.as_ref()].join(OsStr::new(""));
         if full_path.len() > FULLPATH_SIZE {
             return Err(STATUS_OBJECT_NAME_INVALID.into());
@@ -543,7 +546,7 @@ impl FileSystemContext for PtfsContext {
         })
     }
 
-    fn cleanup<P: AsRef<OsStr>>(&self, context: &mut Self::FileContext, file_name: P, flags: u32) {
+    fn cleanup<P: AsRef<OsStr>>(&self, context: &mut Self::FileContext, _file_name: P, flags: u32) {
         if flags & FspCleanupFlags::FspCleanupDelete as u32 != 0 {
             context.handle.invalidate();
         }
@@ -632,7 +635,7 @@ impl FileSystemContext for PtfsContext {
     fn set_delete<P: AsRef<OsStr>>(
         &self,
         context: &Self::FileContext,
-        file_name: P,
+        _file_name: P,
         delete_file: bool,
     ) -> Result<()> {
         let mut disposition_info = FILE_DISPOSITION_INFO::default();
@@ -656,6 +659,43 @@ impl FileSystemContext for PtfsContext {
 
         win32_try!(unsafe FlushFileBuffers(*context.handle));
         self.get_file_info_internal(*context.handle, file_info)
+    }
+
+    fn rename<P: AsRef<OsStr>>(
+        &self,
+        _context: &Self::FileContext,
+        file_name: P,
+        new_file_name: P,
+        replace_if_exists: bool,
+    ) -> Result<()> {
+        let full_path = {
+            let full_path = [self.path.as_os_str(), file_name.as_ref()].join(OsStr::new(""));
+            if full_path.len() > FULLPATH_SIZE {
+                return Err(STATUS_OBJECT_NAME_INVALID.into());
+            }
+            U16CString::from_os_str_truncate(full_path)
+        };
+
+        let new_full_path = {
+            let new_full_path =
+                [self.path.as_os_str(), new_file_name.as_ref()].join(OsStr::new(""));
+            if new_full_path.len() > FULLPATH_SIZE {
+                return Err(STATUS_OBJECT_NAME_INVALID.into());
+            }
+            U16CString::from_os_str_truncate(new_full_path)
+        };
+
+        win32_try!(unsafe MoveFileExW(
+            PCWSTR::from_raw(full_path.as_ptr()),
+            PCWSTR::from_raw(new_full_path.as_ptr()),
+            if replace_if_exists {
+                MOVEFILE_REPLACE_EXISTING
+            } else {
+                MOVE_FILE_FLAGS::default()
+            }
+        ));
+
+        Ok(())
     }
 }
 
@@ -685,7 +725,7 @@ impl Ptfs {
         volume_params.set_UmFileContextIsUserContext2(1);
 
         let prefix = HSTRING::from(volume_prefix);
-        let fs_name = w!("snowflake-fsp");
+        let fs_name = w!("ptfs-winfsp-rs");
 
         volume_params.Prefix[..std::cmp::min(prefix.len(), 192)]
             .copy_from_slice(&prefix.as_wide()[..std::cmp::min(prefix.len(), 192)]);

@@ -63,7 +63,7 @@ fn main() {
             std::process::exit(ERROR_DELAY_LOAD_FAILED.0 as i32)
         }
         FspServiceRunEx(
-            w!("snowflake-fsp").as_ptr().cast_mut(),
+            w!("ptfs-winfsp-rs").as_ptr().cast_mut(),
             Some(_svc_start),
             Some(_svc_stop),
             None,

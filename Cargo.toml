@@ -1,7 +1,10 @@
 [workspace]
 
 members = [
-    "snowflake-fsp",
+    "ptfs-winfsp-rs",
+    "snowflake-projfs",
+    "snowflake-projfs-common",
+    "snowflake-projfs-fsp",
     "winfsp",
     "winfsp-sys"
 ]
