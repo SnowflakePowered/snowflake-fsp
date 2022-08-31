@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::{Component, Path};
 
@@ -14,7 +13,7 @@ pub fn normalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OsString> {
                 prefixes.pop();
             }
             Component::Normal(component) => {
-                let mut prev_string = prefixes.last().cloned().unwrap_or_else(|| OsString::new());
+                let mut prev_string = prefixes.last().cloned().unwrap_or_else(OsString::new);
                 prev_string.push("/");
                 prev_string.push(component);
                 prefixes.push(prev_string)

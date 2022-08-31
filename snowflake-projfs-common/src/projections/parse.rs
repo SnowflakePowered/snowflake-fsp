@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     fn parse_projection_string() {
-        let projection = r#""
+        let _projection = r#""
 file
         "#;
     }
