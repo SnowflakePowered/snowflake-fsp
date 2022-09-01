@@ -1,16 +1,27 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum FileAccess {
     Read,
     ReadWrite,
 }
 
 // todo: zero-copy?
+#[derive(Debug, Eq, PartialEq)]
 pub enum Projection {
-    File(PathBuf, FileAccess),
-    Directory(Vec<Projection>),
+    File {
+        name: OsString,
+        source: PathBuf,
+        access: FileAccess,
+    },
+    Directory {
+        name: OsString,
+        contents: Vec<Projection>,
+    },
     Portal {
-        root: PathBuf,
+        name: OsString,
+        source: PathBuf,
         access: FileAccess,
         protect: Vec<PathBuf>,
     },
