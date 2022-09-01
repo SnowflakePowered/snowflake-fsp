@@ -1,14 +1,12 @@
 use crate::projections::{FileAccess, Projection};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_until1};
-use nom::combinator::{map, not};
-use nom::multi::{many0, separated_list0};
+use nom::combinator::map;
+use nom::multi::separated_list0;
 use nom::{IResult, Parser};
 use os_str_bytes::RawOsString;
-use std::ffi::OsString;
-use std::path::PathBuf;
 
-pub fn parse_projection(s: &[u8]) -> Vec<Projection> {
+pub fn parse_projection(_s: &[u8]) -> Vec<Projection> {
     Vec::new()
 }
 
