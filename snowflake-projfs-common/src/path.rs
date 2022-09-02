@@ -26,8 +26,7 @@ pub fn canonicalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OwnedProjected
     for prefix in path {
         match prefix {
             Component::Prefix(_) => {}
-            Component::RootDir => {
-            }
+            Component::RootDir => {}
             Component::CurDir => {}
             Component::ParentDir => {
                 prefixes.pop();

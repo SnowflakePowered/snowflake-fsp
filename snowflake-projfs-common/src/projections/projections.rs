@@ -1,10 +1,10 @@
 use radix_trie::{Trie, TrieCommon};
 
-use crate::path::{ProjectedPath, OwnedProjectedPath};
+use crate::path;
+use crate::path::{OwnedProjectedPath, ProjectedPath};
 use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use crate::path;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum FileAccess {
@@ -64,7 +64,10 @@ impl Projection {
     ///
     /// A canonical path can be retried with [`canonicalize_path_segments`](crate::path::canonicalize_path_segments).
     /// The canonical path to an existing entry is always the last member of the returned `Vec`.
-    pub fn get_entry<P: AsRef<ProjectedPath>>(&self, canonical_path: P) -> Option<&ProjectionEntry> {
+    pub fn get_entry<P: AsRef<ProjectedPath>>(
+        &self,
+        canonical_path: P,
+    ) -> Option<&ProjectionEntry> {
         self.entries.get(canonical_path.as_ref())
     }
 
@@ -80,7 +83,10 @@ impl Projection {
     ///
     /// If a shorter match exists but is not a Portal, returns None. Only Portals are matched eagerly.
     /// If no match is found, returns None.
-    pub fn search_entry<P: AsRef<Path>>(&self, path: P) -> Option<(&ProjectionEntry, Option<PathBuf>)> {
+    pub fn search_entry<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Option<(&ProjectionEntry, Option<PathBuf>)> {
         let segments = path::canonicalize_path_segments(path.as_ref());
 
         todo!()
