@@ -1,7 +1,8 @@
-use snowflake_projfs_common::projections::ParsedProjection;
+use snowflake_projfs_common::path::OwnedProjectedPath;
+use snowflake_projfs_common::projections::{Projection, ProjectionEntry};
 use std::ffi::{OsStr, OsString};
 use std::os::windows::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use widestring::U16CString;
 use windows::core::HSTRING;
 use windows::w;
@@ -28,12 +29,12 @@ pub struct SnowflakeProjFs {
 
 #[repr(C)]
 struct ProjFsContext {
-    root_projections: Vec<ParsedProjection>,
+    projections: Projection,
 }
 
 enum ProjectedHandle {
     Real(SafeDropHandle),
-    Directory(Vec<ParsedProjection>),
+    Directory(OwnedProjectedPath),
 }
 
 #[repr(C)]
@@ -107,7 +108,7 @@ impl FileSystemContext for ProjFsContext {
         if file_name.as_ref() == "\\" {
             Self::get_root_file_info(file_info);
             return Ok(Self::FileContext {
-                handle: ProjectedHandle::Directory(vec![]),
+                handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
                 dir_buffer: Default::default(),
             });
         }
@@ -132,7 +133,7 @@ impl FileSystemContext for ProjFsContext {
 
 impl SnowflakeProjFs {
     pub fn create(
-        projections: Vec<ParsedProjection>,
+        projections: Vec<ProjectionEntry>,
         volume_prefix: &str,
     ) -> anyhow::Result<SnowflakeProjFs> {
         let mut volume_params = FSP_FSCTL_VOLUME_PARAMS {
@@ -162,7 +163,7 @@ impl SnowflakeProjFs {
             .copy_from_slice(&fs_name.as_wide()[..std::cmp::min(fs_name.len(), 192)]);
 
         let context = ProjFsContext {
-            root_projections: projections,
+            projections: Projection::from(projections.as_slice()),
         };
 
         unsafe {

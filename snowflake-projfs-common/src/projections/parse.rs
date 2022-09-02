@@ -1,51 +1,69 @@
-use crate::projections::{FileAccess, Projection};
+use crate::projections::{FileAccess, ProjectionEntry};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_until1};
-use nom::combinator::map;
+use nom::character::complete::multispace0;
+use nom::combinator::{map, peek};
+use nom::error::ParseError;
 use nom::multi::separated_list0;
+use nom::sequence::delimited;
 use nom::{IResult, Parser};
 use os_str_bytes::RawOsString;
 
-pub fn parse_projection(_s: &[u8]) -> Vec<Projection> {
-    Vec::new()
+pub fn parse_projection(s: &[u8]) -> Option<Vec<ProjectionEntry>> {
+    parse_full_projection(s)
+        .ok()
+        .map(|(i, projections)| projections)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::projections::parse::{parse_directory, parse_file, parse_portal, parse_projection};
-    use crate::projections::{FileAccess, Projection};
-    use std::ffi::OsString;
+    use crate::projections::{FileAccess, ProjectionEntry};
+    use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::str::FromStr;
 
     #[test]
     fn parse_projection_string() {
         let projection = br#"
-f(hello.world|C:\test.txt|r);
-d(directory|f(hello.world|C:\test.txt|r):f(hello.world|C:\test.txt|rw):);
-p(portal|C:\test|rw|protected:file:);
+f(/hello.world|C:\test.txt|r);
+d(/directory|);
+d(/dir2|);
+p(/portal|C:\test|rw|protected:file:|);
+f(/dir2/d0|C:\test.txt|r);
         "#;
 
-        let parsed = parse_projection(projection);
+        let parsed = parse_projection(projection).unwrap();
         assert_eq!(
             parsed,
-            vec![Projection::File {
-                name: OsString::from_str("hello.world").unwrap(),
-                source: PathBuf::from_str("C:\\test.txt").unwrap(),
-                access: FileAccess::Read
-            }]
+            vec![
+                ProjectionEntry::File {
+                    name: OsString::from_str("/hello.world").unwrap().into(),
+                    source: PathBuf::from_str("C:\\test.txt").unwrap(),
+                    access: FileAccess::Read
+                },
+                ProjectionEntry::Directory {
+                    name: OsStr::new("/directory").into(),
+                },
+                ProjectionEntry::Portal {
+                    name: OsString::from_str("/portal").unwrap().into(),
+                    source: PathBuf::from_str("C:\\test").unwrap(),
+                    access: FileAccess::ReadWrite,
+                    protect: vec![PathBuf::from("protected"), PathBuf::from("file"),]
+                }
+            ]
         );
     }
 
     #[test]
     fn parse_file_test() {
-        let projection = br#"f(hello.world|C:\test.txt|r)"#;
+        let projection = br#"f(/hello.world|C:\test.txt|r)"#;
 
         let (_, parsed) = parse_file(projection).unwrap();
         assert_eq!(
             parsed,
-            Projection::File {
-                name: OsString::from_str("hello.world").unwrap(),
+            ProjectionEntry::File {
+                name: OsString::from_str("/hello.world").unwrap().into(),
                 source: PathBuf::from_str("C:\\test.txt").unwrap(),
                 access: FileAccess::Read
             }
@@ -54,12 +72,12 @@ p(portal|C:\test|rw|protected:file:);
 
     #[test]
     fn parse_portal_test() {
-        let projection = br#"p(portal|C:\test|rw|protected:file:);"#;
+        let projection = br#"p(/portal|C:\test|rw|protected:file:|);"#;
         let (_, parsed) = parse_portal(projection).unwrap();
         assert_eq!(
             parsed,
-            Projection::Portal {
-                name: OsString::from_str("portal").unwrap(),
+            ProjectionEntry::Portal {
+                name: OsString::from_str("/portal").unwrap().into(),
                 source: PathBuf::from_str("C:\\test").unwrap(),
                 access: FileAccess::ReadWrite,
                 protect: vec![PathBuf::from("protected"), PathBuf::from("file"),]
@@ -68,28 +86,30 @@ p(portal|C:\test|rw|protected:file:);
     }
     #[test]
     fn parse_directory_test() {
-        let projection =
-            br#"d(directory|f(hello.world|C:\test.txt|r):f(hello.world|C:\test.txt|rw):);"#;
+        let projection = br#"d(/directory|);"#;
         let (_, parsed) = parse_directory(projection).unwrap();
         assert_eq!(
             parsed,
-            Projection::Directory {
-                name: "directory".parse().unwrap(),
-                contents: vec![
-                    Projection::File {
-                        name: "hello.world".parse().unwrap(),
-                        source: "C:\\test.txt".parse().unwrap(),
-                        access: FileAccess::Read
-                    },
-                    Projection::File {
-                        name: "hello.world".parse().unwrap(),
-                        source: "C:\\test.txt".parse().unwrap(),
-                        access: FileAccess::ReadWrite
-                    }
-                ]
+            ProjectionEntry::Directory {
+                name: OsStr::new("/directory").into(),
             }
         );
     }
+}
+
+fn discard_whitespace<'a, F: 'a, O, E: ParseError<&'a [u8]>>(
+    inner: F,
+) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], O, E>
+where
+    F: Fn(&'a [u8]) -> IResult<&'a [u8], O, E>,
+{
+    delimited(multispace0, inner, multispace0)
+}
+
+fn parse_full_projection(input: &[u8]) -> IResult<&[u8], Vec<ProjectionEntry>> {
+    let (input, projections) =
+        separated_list0(tag(";"), discard_whitespace(parse_projection_line))(input)?;
+    Ok((input, projections))
 }
 
 fn parse_rw(input: &[u8]) -> IResult<&[u8], FileAccess> {
@@ -101,13 +121,14 @@ fn parse_rw(input: &[u8]) -> IResult<&[u8], FileAccess> {
     Ok((input, access))
 }
 
-fn parse_projection_line(input: &[u8]) -> IResult<&[u8], Projection> {
-    let (input, projection) = alt((parse_file, parse_portal, parse_directory))(input)?;
+fn parse_projection_line(input: &[u8]) -> IResult<&[u8], ProjectionEntry> {
+    let (input, projection) = alt((parse_portal, parse_file, parse_directory))(input)?;
     Ok((input, projection))
 }
 
-fn parse_file(input: &[u8]) -> IResult<&[u8], Projection> {
+fn parse_file(input: &[u8]) -> IResult<&[u8], ProjectionEntry> {
     let (input, _f) = tag("f(")(input)?;
+    let (input, _) = peek(tag("/"))(input)?;
     let (input, name) = take_until1("|")(input)?;
     let (input, _) = tag("|")(input)?;
     let (input, source) = take_until1("|")(input)?;
@@ -116,8 +137,10 @@ fn parse_file(input: &[u8]) -> IResult<&[u8], Projection> {
     let (input, _) = tag(")")(input)?;
     Ok((
         input,
-        Projection::File {
-            name: RawOsString::assert_from_raw_vec(name.to_vec()).into_os_string(),
+        ProjectionEntry::File {
+            name: RawOsString::assert_from_raw_vec(name.to_vec())
+                .into_os_string()
+                .into(),
             source: RawOsString::assert_from_raw_vec(source.to_vec())
                 .into_os_string()
                 .into(),
@@ -126,21 +149,25 @@ fn parse_file(input: &[u8]) -> IResult<&[u8], Projection> {
     ))
 }
 
-fn parse_portal(input: &[u8]) -> IResult<&[u8], Projection> {
+fn parse_portal(input: &[u8]) -> IResult<&[u8], ProjectionEntry> {
     let (input, _p) = tag("p(")(input)?;
+    let (input, _) = peek(tag("/"))(input)?;
     let (input, name) = take_until1("|")(input)?;
     let (input, _) = tag("|")(input)?;
     let (input, source) = take_until1("|")(input)?;
     let (input, _) = tag("|")(input)?;
     let (input, access) = parse_rw(input)?;
     let (input, _) = tag("|")(input)?;
-    let (input, protect) = separated_list0(tag(":"), take_until(":"))(input)?;
-    let (input, _) = tag(":")(input)?;
+    let (input, protect_str) = take_until1("|")(input)?;
+    let (_, protect) = separated_list0(tag(":"), take_until(":"))(protect_str)?;
+    let (input, _) = tag("|")(input)?;
     let (input, _) = tag(")")(input)?;
     Ok((
         input,
-        Projection::Portal {
-            name: RawOsString::assert_from_raw_vec(name.to_vec()).into_os_string(),
+        ProjectionEntry::Portal {
+            name: RawOsString::assert_from_raw_vec(name.to_vec())
+                .into_os_string()
+                .into(),
             source: RawOsString::assert_from_raw_vec(source.to_vec())
                 .into_os_string()
                 .into(),
@@ -157,18 +184,18 @@ fn parse_portal(input: &[u8]) -> IResult<&[u8], Projection> {
     ))
 }
 
-fn parse_directory(input: &[u8]) -> IResult<&[u8], Projection> {
+fn parse_directory(input: &[u8]) -> IResult<&[u8], ProjectionEntry> {
     let (input, _f) = tag("d(")(input)?;
+    let (input, _) = peek(tag("/"))(input)?;
     let (input, name) = take_until1("|")(input)?;
     let (input, _) = tag("|")(input)?;
-    let (input, contents) = separated_list0(tag(":"), parse_projection_line)(input)?;
-    let (input, _) = tag(":")(input)?;
     let (input, _) = tag(")")(input)?;
     Ok((
         input,
-        Projection::Directory {
-            name: RawOsString::assert_from_raw_vec(name.to_vec()).into_os_string(),
-            contents,
+        ProjectionEntry::Directory {
+            name: RawOsString::assert_from_raw_vec(name.to_vec())
+                .into_os_string()
+                .into(),
         },
     ))
 }
