@@ -4,17 +4,14 @@ use std::ffi::{OsStr, OsString};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use widestring::U16CString;
-use windows::core::HSTRING;
+use windows::core::{HSTRING, PCWSTR};
 use windows::w;
 use windows::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, MAX_PATH, STATUS_FILE_NOT_AVAILABLE, STATUS_INVALID_DEVICE_REQUEST,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY};
-use winfsp::filesystem::{
-    DirBuffer, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO,
-    FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
-};
+use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use winfsp::filesystem::{DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS};
 use winfsp::util::SafeDropHandle;
 
 const ALLOCATION_UNIT: u16 = 4096;
@@ -118,6 +115,38 @@ impl FileSystemContext for ProjFsContext {
 
     fn close(&self, context: Self::FileContext) {}
 
+    fn read_directory<P: Into<PCWSTR>>(&self, context: &mut Self::FileContext,
+                                       pattern: Option<P>,
+                                       marker: DirMarker,
+                                       buffer: &mut [u8]) -> winfsp::Result<u32> {
+        if let Ok(mut buffer) =
+            context.dir_buffer.acquire(marker.is_none(), None) {
+            let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
+
+            match &context.handle {
+                ProjectedHandle::Real(_) => {},
+                ProjectedHandle::Directory(path) if path == OwnedProjectedPath::ROOT => {
+                    dirinfo.reset();
+                    let finfo = dirinfo.file_info_mut();
+                    finfo.FileAttributes = FILE_ATTRIBUTE_NORMAL.0;
+
+                    dirinfo.set_file_name("test")?;
+
+                    if let Err(e) = buffer.write(&mut dirinfo) {
+                        eprintln!("{:?}", e);
+                        drop(buffer);
+                        return Err(e);
+                    }
+                }
+                ProjectedHandle::Directory(path) => {
+                }
+            }
+
+        }
+
+        Ok(context.dir_buffer.read(marker, buffer))
+    }
+
     fn get_volume_info(&self, out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> winfsp::Result<()> {
         let mut total_size = 0u64;
         let mut free_size = 0u64;
@@ -149,7 +178,7 @@ impl SnowflakeProjFs {
         volume_params.set_UnicodeOnDisk(1);
         volume_params.set_PersistentAcls(1);
         volume_params.set_PostCleanupWhenModifiedOnly(1);
-        volume_params.set_PassQueryDirectoryPattern(1);
+        // volume_params.set_PassQueryDirectoryPattern(1);
         volume_params.set_FlushAndPurgeOnCleanup(1);
         volume_params.set_UmFileContextIsUserContext2(1);
 

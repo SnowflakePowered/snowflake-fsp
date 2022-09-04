@@ -47,10 +47,18 @@ pub fn canonicalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OwnedProjected
 pub struct OwnedProjectedPath(OsString);
 
 impl OwnedProjectedPath {
+    pub const ROOT: &'static str = "/";
     pub fn root() -> Self {
-        OwnedProjectedPath::from("/")
+        OwnedProjectedPath::from(OwnedProjectedPath::ROOT)
     }
 }
+
+impl PartialEq<str> for OwnedProjectedPath {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
 
 #[derive(Debug, PartialEq, Eq)]
 #[repr(transparent)]
