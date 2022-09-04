@@ -1,5 +1,4 @@
 use os_str_bytes::OsStrBytes;
-use radix_trie::TrieKey;
 use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
@@ -115,15 +114,34 @@ impl AsRef<ProjectedPath> for &str {
     }
 }
 
-impl TrieKey for ProjectedPath {
-    fn encode_bytes(&self) -> Vec<u8> {
-        self.0.to_raw_bytes().to_vec()
+impl AsRef<ProjectedPath> for OwnedProjectedPath {
+    fn as_ref(&self) -> &ProjectedPath {
+        ProjectedPath::new(self.0.as_os_str())
     }
 }
 
-impl TrieKey for OwnedProjectedPath {
-    fn encode_bytes(&self) -> Vec<u8> {
-        self.0.to_raw_bytes().to_vec()
+impl Borrow<[u8]> for ProjectedPath {
+    fn borrow(&self) -> &[u8] {
+        // !! crimes ahead !!
+        // SAFETY: the resultant encoding is unspecified and can change between compilations.
+        //
+        // assumptions:
+        // 1. the encoding of OsStr is consistent for the lifetime of the program instance
+        // 2. OsStr is layout compatible with [u8]. This follows from `sys::os_str::Slice` being
+        //    repr(transparent) on Windows over a Wtf8 { bytes: [u8] }.
+        unsafe {
+            std::mem::transmute(&self.0)
+        }
+    }
+}
+
+impl Borrow<[u8]> for OwnedProjectedPath {
+    fn borrow(&self) -> &[u8] {
+        // !! crimes ahead !!
+        // SAFETY: the resultant encoding is unspecified and can change between compilations.
+        unsafe {
+            std::mem::transmute(self.0.as_os_str())
+        }
     }
 }
 

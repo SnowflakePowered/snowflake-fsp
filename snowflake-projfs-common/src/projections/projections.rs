@@ -1,10 +1,10 @@
-use radix_trie::{Trie, TrieCommon};
 
 use crate::path;
 use crate::path::{OwnedProjectedPath, ProjectedPath};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use qp_trie::Trie;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum FileAccess {
@@ -36,25 +36,24 @@ pub struct Projection {
 }
 
 impl Projection {
-    pub fn get_children<P: AsRef<ProjectedPath>>(
-        &self,
+    pub fn get_children<'a, P: AsRef<ProjectedPath> + 'a>(
+        &'a self,
         canonical_path: P,
-    ) -> Option<Vec<&ProjectionEntry>> {
-        if let Some(sub) = self.entries.subtrie(canonical_path.as_ref()) {
-            let vecs = sub
-                .iter()
-                .filter_map(|(key, entry)| {
-                    if key.parent() == Some(canonical_path.as_ref()) {
-                        Some(entry)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            Some(vecs)
-        } else {
-            None
+    ) -> Option<impl Iterator<Item = &ProjectionEntry>> {
+        let subtrie = self.entries.subtrie(canonical_path.as_ref());
+        if subtrie.is_empty() {
+            return None;
         }
+        let vecs = subtrie
+            .iter()
+            .filter_map(move |(key, entry)| {
+                if key.parent().as_deref() == Some(canonical_path.as_ref()) {
+                    Some(entry)
+                } else {
+                    None
+                }
+            });
+        Some(vecs)
     }
 
     /// Gets the entry in the projection with the given canonical path.
@@ -88,8 +87,7 @@ impl Projection {
         path: P,
     ) -> Option<(&ProjectionEntry, Option<PathBuf>)> {
         let segments = path::canonicalize_path_segments(path.as_ref());
-
-        todo!()
+        None
     }
 }
 
@@ -111,12 +109,7 @@ impl From<&[ProjectionEntry]> for Projection {
                 ProjectionEntry::File { name, .. }
                 | ProjectionEntry::Portal { name, .. }
                 | ProjectionEntry::Directory { name, .. } => {
-                    let parent = name.parent();
-                    if let Some(parent_path) = &parent {
-                        if let Some(mut subtrie) = map.subtrie_mut(*parent_path) {
-                            subtrie.insert(name.clone(), projection.clone()).unwrap();
-                        }
-                    }
+                    map.insert(name.clone(), projection.clone());
                 }
             }
         }
@@ -138,6 +131,11 @@ impl ProjectionEntry {
         let path = Path::new(self.full_path());
         path.file_name()
     }
+
+    // Returns true if the entry is a portal or a directory.
+    pub fn is_directory(&self) -> bool {
+        matches!(self, ProjectionEntry::Portal { .. } | ProjectionEntry::Directory { .. })
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +154,6 @@ f(/dir/d0|C:\test.txt|r);
         eprintln!("{:?}", projection);
         let trie = Projection::from(projection.as_slice());
 
-        eprintln!("{:?}", trie.get_children("/"))
+        eprintln!("{:?}", trie.get_children("/dir").map(|s| s.collect::<Vec<_>>()))
     }
 }
