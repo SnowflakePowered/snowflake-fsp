@@ -1,16 +1,14 @@
-use snowflake_projfs_common::path::OwnedProjectedPath;
+use snowflake_projfs_common::path::{canonicalize_path_segments, OwnedProjectedPath};
 use snowflake_projfs_common::projections::{Projection, ProjectionEntry};
 use std::ffi::{OsStr, OsString};
-use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use widestring::U16CString;
 use windows::core::{HSTRING, PCWSTR};
 use windows::w;
 use windows::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, MAX_PATH, STATUS_FILE_NOT_AVAILABLE, STATUS_INVALID_DEVICE_REQUEST,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED};
 use winfsp::filesystem::{DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS};
 use winfsp::util::SafeDropHandle;
 
@@ -30,7 +28,11 @@ struct ProjFsContext {
 }
 
 enum ProjectedHandle {
-    Real(SafeDropHandle),
+    /// A real file opened under a portal.
+    Real { handle: SafeDropHandle, parent: OwnedProjectedPath },
+    /// A projected file or directory that points to a real filesystem entry.
+    Projected(SafeDropHandle),
+    /// A directory with a canonical path in the projection tree.
     Directory(OwnedProjectedPath),
 }
 
@@ -103,11 +105,16 @@ impl FileSystemContext for ProjFsContext {
     ) -> winfsp::Result<Self::FileContext> {
         eprintln!("open: {:?}", file_name.as_ref());
         if file_name.as_ref() == "\\" {
+            eprintln!("open: root");
             Self::get_root_file_info(file_info);
             return Ok(Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
                 dir_buffer: Default::default(),
             });
+        }
+
+        if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
+
         }
 
         Err(ERROR_FILE_NOT_FOUND.into())
@@ -124,22 +131,34 @@ impl FileSystemContext for ProjFsContext {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
 
             match &context.handle {
-                ProjectedHandle::Real(_) => {},
-                ProjectedHandle::Directory(path) if path == OwnedProjectedPath::ROOT => {
-                    dirinfo.reset();
-                    let finfo = dirinfo.file_info_mut();
-                    finfo.FileAttributes = FILE_ATTRIBUTE_NORMAL.0;
-
-                    dirinfo.set_file_name("test")?;
-
-                    if let Err(e) = buffer.write(&mut dirinfo) {
-                        eprintln!("{:?}", e);
-                        drop(buffer);
-                        return Err(e);
-                    }
-                }
+                ProjectedHandle::Real { .. } => {}
+                ProjectedHandle::Projected(_) => {},
                 ProjectedHandle::Directory(path) => {
-                }
+                    if let Some(root_dir) = self.projections.get_children(path) {
+                        for entry in root_dir {
+                            let filename = entry.file_name()
+                                .expect("projection entry must have filename, can not be root.");
+
+                            dirinfo.reset();
+                            let finfo = dirinfo.file_info_mut();
+
+                            finfo.FileAttributes = if entry.is_directory() {
+                                FILE_ATTRIBUTE_DIRECTORY.0
+                            } else {
+                                // todo: fetch actual attributes
+                                FILE_ATTRIBUTE_NORMAL.0
+                            };
+
+                            dirinfo.set_file_name(filename)?;
+
+                            if let Err(e) = buffer.write(&mut dirinfo) {
+                                eprintln!("{:?}", e);
+                                drop(buffer);
+                                return Err(e);
+                            }
+                        }
+                    }
+                },
             }
 
         }

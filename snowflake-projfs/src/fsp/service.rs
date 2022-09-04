@@ -7,10 +7,13 @@ pub fn svc_start(args: Args) -> anyhow::Result<SnowflakeProjFs> {
     let projection = br#"
 f(/hello.world|C:\test.txt|r);
 d(/directory|);
-p(/portal|C:\test|rw|protected:file:);
+d(/dir2|);
+p(/portal|C:\test|rw|protected:file:|);
+f(/dir2/d0|C:\test.txt|r);
         "#;
 
     let parsed = parse_projection(projection).unwrap();
+    eprintln!("{:?}", parsed);
     let mut projfs =
         SnowflakeProjFs::create(parsed, &args.volume_prefix.unwrap_or(String::from("")))?;
 
