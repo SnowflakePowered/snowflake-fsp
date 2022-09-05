@@ -1,8 +1,9 @@
-use os_str_bytes::OsStrBytes;
 use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
-use std::path::{Component, Path};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Component, Path, PathBuf};
+use qp_trie::Break;
 
 /// Canonicalize path segments relative to the root.
 ///
@@ -42,6 +43,46 @@ pub fn canonicalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OwnedProjected
     prefixes.iter().map(OwnedProjectedPath::from).collect()
 }
 
+// canonicalize the path in place?
+pub fn canonicalize_path<P: AsRef<Path>>(path: P) -> OwnedProjectedPath {
+    let path: Vec<Component> = path.as_ref().components().collect();
+    if path.len() == 1 && path[0] == Component::RootDir {
+        return OwnedProjectedPath::root();
+    }
+
+    let mut prefixes = PathBuf::new();
+    for prefix in path {
+        match prefix {
+            Component::Prefix(_) => {}
+            Component::RootDir => {
+                prefixes.push("/")
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                prefixes.pop();
+            }
+            Component::Normal(component) => {
+                prefixes.push(component)
+            }
+        }
+    }
+
+    let result = prefixes.into_os_string();
+
+    let result = if cfg!(target_os = "windows") {
+        let bytes: Vec<u16> = result.encode_wide().map(|c| if c == b'\\' as u16 {
+            b'/' as u16
+        } else {
+            c
+        }).collect();
+        OsString::from_wide(&bytes)
+    } else {
+        result
+    };
+
+    OwnedProjectedPath(result)
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct OwnedProjectedPath(OsString);
 
@@ -70,6 +111,10 @@ impl ProjectedPath {
 
     pub fn new<S: AsRef<OsStr> + ?Sized>(s: &S) -> &ProjectedPath {
         unsafe { &*(s.as_ref() as *const OsStr as *const ProjectedPath) }
+    }
+
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.0)
     }
 }
 
@@ -122,6 +167,10 @@ impl AsRef<ProjectedPath> for OwnedProjectedPath {
 
 impl Borrow<[u8]> for ProjectedPath {
     fn borrow(&self) -> &[u8] {
+
+        #[cfg(target_os = "linix")]
+        return std::os::unix::ffi::OsStrExt::as_bytes(&self.0);
+
         // !! crimes ahead !!
         // SAFETY: the resultant encoding is unspecified and can change between compilations.
         //
@@ -129,6 +178,7 @@ impl Borrow<[u8]> for ProjectedPath {
         // 1. the encoding of OsStr is consistent for the lifetime of the program instance
         // 2. OsStr is layout compatible with [u8]. This follows from `sys::os_str::Slice` being
         //    repr(transparent) on Windows over a Wtf8 { bytes: [u8] }.
+        #[cfg(target_os = "windows")]
         unsafe {
             std::mem::transmute(&self.0)
         }
@@ -137,11 +187,28 @@ impl Borrow<[u8]> for ProjectedPath {
 
 impl Borrow<[u8]> for OwnedProjectedPath {
     fn borrow(&self) -> &[u8] {
+
+        #[cfg(target_os = "linux")]
+        return std::os::unix::ffi::OsStrExt::as_bytes(&self.0);
+
         // !! crimes ahead !!
         // SAFETY: the resultant encoding is unspecified and can change between compilations.
+        #[cfg(target_os = "windows")]
         unsafe {
             std::mem::transmute(self.0.as_os_str())
         }
+    }
+}
+
+impl Break for OwnedProjectedPath {
+    type Split = [u8];
+
+    fn empty<'a>() -> &'a Self::Split {
+        <&'a [u8]>::default()
+    }
+
+    fn find_break(&self, loc: usize) -> &Self::Split {
+        &<Self as Borrow<[u8]>>::borrow(self)[..loc]
     }
 }
 

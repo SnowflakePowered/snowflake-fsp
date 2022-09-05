@@ -3,7 +3,7 @@ use crate::path;
 use crate::path::{OwnedProjectedPath, ProjectedPath};
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use qp_trie::Trie;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -72,25 +72,76 @@ impl Projection {
 
     /// Searches for an entry given a path from the filesystem driver.
     ///
-    /// Canonical path segments are constructed from the input, and searched in longest-to-shortest
-    /// match.
+    /// If the canonicalized input exists in the Projection, returns such longest match.
     ///
-    /// If the longest match exists in the Projection, returns such longest match.
-    ///
-    /// Otherwise, the segments are progressively searched for a Portal. If a portal is found,
-    /// returns the Portal entry, and the path to the target within the Portal.
+    /// Otherwise, the longest common path prefix is searched for a Portal. If a Portal is found,
+    /// returns the Portal entry, and the path to the target relative to the Portal source.
     ///
     /// If a shorter match exists but is not a Portal, returns None. Only Portals are matched eagerly.
     /// If no match is found, returns None.
+    ///
+    /// If a portal is found, the returned segment is a non-projected, OS-dependent PathBuf. This means
+    /// that the path separator is OS-dependent, and can be directly pushed into a PathBuf of the
+    /// real path to the portal.
     pub fn search_entry<P: AsRef<Path>>(
         &self,
         path: P,
     ) -> Option<(&ProjectionEntry, Option<PathBuf>)> {
-        let segments = path::canonicalize_path_segments(path.as_ref());
+        if path.as_ref().components().count() == 0 {
+            return None;
+        }
+
+        let full_path = path::canonicalize_path(path.as_ref());
+
+        if let Some(entry) = self.entries.get(&full_path) {
+            return Some((entry, None));
+        }
+
+        // SAFETY: segments can not be empty.
+        // Never use returned prefixes directly because they are in WTF8 on windows.
+        let prefix = self.entries.longest_common_prefix(&full_path);
+        let entry = self.entries.get(prefix);
+        if let Some(entry) = entry {
+            if !entry.is_portal() {
+                return None;
+            }
+            let path = entry.full_path();
+
+            let mut proj_iter = path.as_path().components().peekable();
+            let mut req_iter = full_path.as_path().components().peekable();
+
+            while let (Some(proj), Some(req)) = (proj_iter.peek(), req_iter.peek()) {
+                if proj != req {
+                    break;
+                }
+                proj_iter.next();
+                req_iter.next();
+            }
+
+            let mut rest = PathBuf::new();
+            for component in req_iter {
+                match component {
+                    Component::Prefix(_) => {}
+                    Component::RootDir => {
+                        rest.push(std::path::MAIN_SEPARATOR_STR)
+                    }
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        rest.pop();
+                    }
+                    Component::Normal(s) => rest.push(s)
+                }
+            }
+
+
+            return Some((entry, Some(rest)))
+        }
+
         None
-    }
+   }
 }
 
+// todo: this needs to be TryFrom to validate projection portal existence
 impl From<&[ProjectionEntry]> for Projection {
     fn from(parsed_projection: &[ProjectionEntry]) -> Self {
         let mut map = Trie::new();
@@ -136,24 +187,57 @@ impl ProjectionEntry {
     pub fn is_directory(&self) -> bool {
         matches!(self, ProjectionEntry::Portal { .. } | ProjectionEntry::Directory { .. })
     }
+
+    pub fn is_portal(&self) -> bool {
+        matches!(self, ProjectionEntry::Portal { .. })
+    }
+
+    pub fn portal_source(&self) -> Option<&Path> {
+        match self {
+            ProjectionEntry::Portal { source, .. } => Some(source.as_path()),
+            _ => None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::projections::{parse_projection, Projection};
+    use std::path::{Path, PathBuf};
+    use crate::path::OwnedProjectedPath;
+    use crate::projections::{FileAccess, parse_projection, Projection, ProjectionEntry};
 
-    #[test]
-    fn map_test() {
+    fn get_test_trie() -> Projection {
         let projection = br#"
 f(/hello.txt|C:\test.txt|r);
 p(/portal|C:\test|rw|protected:file:|);
 d(/dir|);
 f(/dir/d0|C:\test.txt|r);
+f(/dir/d2|C:\test.txt|r);
         "#;
         let projection = parse_projection(projection).unwrap();
-        eprintln!("{:?}", projection);
-        let trie = Projection::from(projection.as_slice());
+        Projection::from(projection.as_slice())
+    }
+    #[test]
+    fn map_test() {
+        let trie = get_test_trie();
 
-        eprintln!("{:?}", trie.get_children("/dir").map(|s| s.collect::<Vec<_>>()))
+        eprintln!("{:?}", trie.get_children("/dir").map(|s| s.collect::<Vec<_>>()));
+
+        // assert_eq!(trie.get_children("/dir").map(|s| s.count()), Some(2));
+
+        assert_eq!(trie.get_children("/").map(|s| s.count()), Some(3))
+
+    }
+
+    #[test]
+    fn search_test() {
+        let trie = get_test_trie();
+        let res = trie.search_entry("/portal/remainder/of/directory");
+        assert_eq!(res, Some((&ProjectionEntry::Portal {
+            name: OwnedProjectedPath::from("/portal"),
+            source: Path::new("C:\\test").to_path_buf(),
+            access: FileAccess::ReadWrite,
+            protect: ["protected", "file"].iter().map(Path::new).map(Path::to_path_buf).collect::<Vec<PathBuf>>()
+        }, Some(Path::new("remainder\\of\\directory").to_path_buf()))))
     }
 }

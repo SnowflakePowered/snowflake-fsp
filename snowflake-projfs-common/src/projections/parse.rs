@@ -12,7 +12,7 @@ use os_str_bytes::RawOsString;
 pub fn parse_projection(s: &[u8]) -> Option<Vec<ProjectionEntry>> {
     parse_full_projection(s)
         .ok()
-        .map(|(i, projections)| projections)
+        .map(|(_i, projections)| projections)
 }
 
 #[cfg(test)]
