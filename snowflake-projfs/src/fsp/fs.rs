@@ -8,7 +8,7 @@ use windows::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, MAX_PATH, STATUS_FILE_NOT_AVAILABLE, STATUS_INVALID_DEVICE_REQUEST,
 };
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED};
+use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED};
 use winfsp::filesystem::{DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS};
 use winfsp::util::SafeDropHandle;
 
@@ -56,7 +56,7 @@ macro_rules! win32_try {
 }
 
 impl ProjFsContext {
-    fn get_root_file_info(file_info: &mut FSP_FSCTL_FILE_INFO) {
+    fn get_virtdir_file_info(file_info: &mut FSP_FSCTL_FILE_INFO) {
         file_info.FileAttributes = FILE_ATTRIBUTE_DIRECTORY.0;
 
         file_info.ReparseTag = 0;
@@ -83,10 +83,26 @@ impl FileSystemContext for ProjFsContext {
 
         if file_name.as_ref() == "\\" {
             return Ok(FileSecurity {
-                attributes: FILE_ATTRIBUTE_DIRECTORY.0,
+                attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
                 reparse: false,
                 sz_security_descriptor: 0,
             });
+        }
+
+        if let Some((entry, remainder)) =
+        self.projections.search_entry(file_name.as_ref()) {
+            match entry {
+                // todo: need to get real shit.
+                ProjectionEntry::File { .. } => {}
+                ProjectionEntry::Portal { .. } => {}
+                ProjectionEntry::Directory { .. } => {
+                    return Ok(FileSecurity {
+                        attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
+                        reparse: false,
+                        sz_security_descriptor: 0,
+                    });
+                }
+            }
         }
 
         Ok(FileSecurity {
@@ -106,15 +122,27 @@ impl FileSystemContext for ProjFsContext {
         eprintln!("open: {:?}", file_name.as_ref());
         if file_name.as_ref() == "\\" {
             eprintln!("open: root");
-            Self::get_root_file_info(file_info);
+            Self::get_virtdir_file_info(file_info);
             return Ok(Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
                 dir_buffer: Default::default(),
             });
         }
 
-        if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
-
+        if let Some((entry, remainder)) =
+            self.projections.search_entry(file_name.as_ref()) {
+            match entry {
+                ProjectionEntry::File { .. } => {}
+                ProjectionEntry::Directory { name, .. } => {
+                    eprintln!("vd: {:?}", name);
+                    Self::get_virtdir_file_info(file_info);
+                    return Ok(Self::FileContext {
+                        handle: ProjectedHandle::Directory(name.clone()),
+                        dir_buffer: Default::default(),
+                    });
+                }
+                ProjectionEntry::Portal { .. } => {}
+            }
         }
 
         Err(ERROR_FILE_NOT_FOUND.into())

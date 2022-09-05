@@ -44,10 +44,11 @@ impl Projection {
         if subtrie.is_empty() {
             return None;
         }
+        // todo: figure out a way to do bfs rather than the subtrie dfs order.
         let vecs = subtrie
             .iter()
             .filter_map(move |(key, entry)| {
-                if key.parent().as_deref() == Some(canonical_path.as_ref()) {
+                if key.parent() == Some(canonical_path.as_ref()) {
                     Some(entry)
                 } else {
                     None
@@ -133,6 +134,8 @@ impl Projection {
                 }
             }
 
+            // If the rest was empty, we should have returned the Portal directly before.
+            assert_ne!(rest.as_os_str(), OsStr::new(""));
 
             return Some((entry, Some(rest)))
         }
@@ -239,5 +242,17 @@ f(/dir/d2|C:\test.txt|r);
             access: FileAccess::ReadWrite,
             protect: ["protected", "file"].iter().map(Path::new).map(Path::to_path_buf).collect::<Vec<PathBuf>>()
         }, Some(Path::new("remainder\\of\\directory").to_path_buf()))))
+    }
+
+    #[test]
+    fn search_direct_portal_test() {
+        let trie = get_test_trie();
+        let res = trie.search_entry("/portal/");
+        assert_eq!(res, Some((&ProjectionEntry::Portal {
+            name: OwnedProjectedPath::from("/portal"),
+            source: Path::new("C:\\test").to_path_buf(),
+            access: FileAccess::ReadWrite,
+            protect: ["protected", "file"].iter().map(Path::new).map(Path::to_path_buf).collect::<Vec<PathBuf>>()
+        }, None)))
     }
 }
