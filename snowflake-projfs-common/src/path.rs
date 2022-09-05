@@ -1,9 +1,9 @@
+use qp_trie::Break;
 use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
-use qp_trie::Break;
 
 /// Canonicalize path segments relative to the root.
 ///
@@ -54,27 +54,22 @@ pub fn canonicalize_path<P: AsRef<Path>>(path: P) -> OwnedProjectedPath {
     for prefix in path {
         match prefix {
             Component::Prefix(_) => {}
-            Component::RootDir => {
-                prefixes.push("/")
-            }
+            Component::RootDir => prefixes.push("/"),
             Component::CurDir => {}
             Component::ParentDir => {
                 prefixes.pop();
             }
-            Component::Normal(component) => {
-                prefixes.push(component)
-            }
+            Component::Normal(component) => prefixes.push(component),
         }
     }
 
     let result = prefixes.into_os_string();
 
     let result = if cfg!(target_os = "windows") {
-        let bytes: Vec<u16> = result.encode_wide().map(|c| if c == b'\\' as u16 {
-            b'/' as u16
-        } else {
-            c
-        }).collect();
+        let bytes: Vec<u16> = result
+            .encode_wide()
+            .map(|c| if c == b'\\' as u16 { b'/' as u16 } else { c })
+            .collect();
         OsString::from_wide(&bytes)
     } else {
         result
@@ -98,7 +93,6 @@ impl PartialEq<str> for OwnedProjectedPath {
         self.0 == other
     }
 }
-
 
 #[derive(Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -167,7 +161,6 @@ impl AsRef<ProjectedPath> for OwnedProjectedPath {
 
 impl Borrow<[u8]> for ProjectedPath {
     fn borrow(&self) -> &[u8] {
-
         #[cfg(target_os = "linix")]
         return std::os::unix::ffi::OsStrExt::as_bytes(&self.0);
 
@@ -187,7 +180,6 @@ impl Borrow<[u8]> for ProjectedPath {
 
 impl Borrow<[u8]> for OwnedProjectedPath {
     fn borrow(&self) -> &[u8] {
-
         #[cfg(target_os = "linux")]
         return std::os::unix::ffi::OsStrExt::as_bytes(&self.0);
 

@@ -1,10 +1,9 @@
-
 use crate::path;
 use crate::path::{OwnedProjectedPath, ProjectedPath};
-use std::ffi::{OsStr, OsString};
+use qp_trie::Trie;
+use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
-use qp_trie::Trie;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum FileAccess {
@@ -45,15 +44,13 @@ impl Projection {
             return None;
         }
         // todo: figure out a way to do bfs rather than the subtrie dfs order.
-        let vecs = subtrie
-            .iter()
-            .filter_map(move |(key, entry)| {
-                if key.parent() == Some(canonical_path.as_ref()) {
-                    Some(entry)
-                } else {
-                    None
-                }
-            });
+        let vecs = subtrie.iter().filter_map(move |(key, entry)| {
+            if key.parent() == Some(canonical_path.as_ref()) {
+                Some(entry)
+            } else {
+                None
+            }
+        });
         Some(vecs)
     }
 
@@ -123,25 +120,23 @@ impl Projection {
             for component in req_iter {
                 match component {
                     Component::Prefix(_) => {}
-                    Component::RootDir => {
-                        rest.push(std::path::MAIN_SEPARATOR_STR)
-                    }
+                    Component::RootDir => rest.push(std::path::MAIN_SEPARATOR_STR),
                     Component::CurDir => {}
                     Component::ParentDir => {
                         rest.pop();
                     }
-                    Component::Normal(s) => rest.push(s)
+                    Component::Normal(s) => rest.push(s),
                 }
             }
 
             // If the rest was empty, we should have returned the Portal directly before.
             assert_ne!(rest.as_os_str(), OsStr::new(""));
 
-            return Some((entry, Some(rest)))
+            return Some((entry, Some(rest)));
         }
 
         None
-   }
+    }
 }
 
 // todo: this needs to be TryFrom to validate projection portal existence
@@ -188,7 +183,10 @@ impl ProjectionEntry {
 
     // Returns true if the entry is a portal or a directory.
     pub fn is_directory(&self) -> bool {
-        matches!(self, ProjectionEntry::Portal { .. } | ProjectionEntry::Directory { .. })
+        matches!(
+            self,
+            ProjectionEntry::Portal { .. } | ProjectionEntry::Directory { .. }
+        )
     }
 
     pub fn is_portal(&self) -> bool {
@@ -198,16 +196,16 @@ impl ProjectionEntry {
     pub fn portal_source(&self) -> Option<&Path> {
         match self {
             ProjectionEntry::Portal { source, .. } => Some(source.as_path()),
-            _ => None
+            _ => None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
     use crate::path::OwnedProjectedPath;
-    use crate::projections::{FileAccess, parse_projection, Projection, ProjectionEntry};
+    use crate::projections::{parse_projection, FileAccess, Projection, ProjectionEntry};
+    use std::path::{Path, PathBuf};
 
     fn get_test_trie() -> Projection {
         let projection = br#"
@@ -224,35 +222,57 @@ f(/dir/d2|C:\test.txt|r);
     fn map_test() {
         let trie = get_test_trie();
 
-        eprintln!("{:?}", trie.get_children("/dir").map(|s| s.collect::<Vec<_>>()));
+        eprintln!(
+            "{:?}",
+            trie.get_children("/dir").map(|s| s.collect::<Vec<_>>())
+        );
 
         // assert_eq!(trie.get_children("/dir").map(|s| s.count()), Some(2));
 
         assert_eq!(trie.get_children("/").map(|s| s.count()), Some(3))
-
     }
 
     #[test]
     fn search_test() {
         let trie = get_test_trie();
         let res = trie.search_entry("/portal/remainder/of/directory");
-        assert_eq!(res, Some((&ProjectionEntry::Portal {
-            name: OwnedProjectedPath::from("/portal"),
-            source: Path::new("C:\\test").to_path_buf(),
-            access: FileAccess::ReadWrite,
-            protect: ["protected", "file"].iter().map(Path::new).map(Path::to_path_buf).collect::<Vec<PathBuf>>()
-        }, Some(Path::new("remainder\\of\\directory").to_path_buf()))))
+        assert_eq!(
+            res,
+            Some((
+                &ProjectionEntry::Portal {
+                    name: OwnedProjectedPath::from("/portal"),
+                    source: Path::new("C:\\test").to_path_buf(),
+                    access: FileAccess::ReadWrite,
+                    protect: ["protected", "file"]
+                        .iter()
+                        .map(Path::new)
+                        .map(Path::to_path_buf)
+                        .collect::<Vec<PathBuf>>()
+                },
+                Some(Path::new("remainder\\of\\directory").to_path_buf())
+            ))
+        )
     }
 
     #[test]
     fn search_direct_portal_test() {
         let trie = get_test_trie();
         let res = trie.search_entry("/portal/");
-        assert_eq!(res, Some((&ProjectionEntry::Portal {
-            name: OwnedProjectedPath::from("/portal"),
-            source: Path::new("C:\\test").to_path_buf(),
-            access: FileAccess::ReadWrite,
-            protect: ["protected", "file"].iter().map(Path::new).map(Path::to_path_buf).collect::<Vec<PathBuf>>()
-        }, None)))
+        assert_eq!(
+            res,
+            Some((
+                &ProjectionEntry::Portal {
+                    name: OwnedProjectedPath::from("/portal"),
+                    source: Path::new("C:\\test").to_path_buf(),
+                    access: FileAccess::ReadWrite,
+                    protect: ["protected", "file"]
+                        .iter()
+                        .map(Path::new)
+                        .map(Path::to_path_buf)
+                        .collect::<Vec<PathBuf>>()
+                },
+                None
+            ))
+        )
     }
 }

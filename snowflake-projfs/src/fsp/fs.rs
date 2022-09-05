@@ -1,15 +1,18 @@
-use snowflake_projfs_common::path::{canonicalize_path_segments, OwnedProjectedPath};
+use snowflake_projfs_common::path::OwnedProjectedPath;
 use snowflake_projfs_common::projections::{Projection, ProjectionEntry};
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+
 use windows::core::{HSTRING, PCWSTR};
 use windows::w;
-use windows::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, MAX_PATH, STATUS_FILE_NOT_AVAILABLE, STATUS_INVALID_DEVICE_REQUEST,
-};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, MAX_PATH};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_UNPINNED};
-use winfsp::filesystem::{DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS};
+use windows::Win32::Storage::FileSystem::{
+    FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+};
+use winfsp::filesystem::{
+    DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost,
+    FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
+};
 use winfsp::util::SafeDropHandle;
 
 const ALLOCATION_UNIT: u16 = 4096;
@@ -29,7 +32,10 @@ struct ProjFsContext {
 
 enum ProjectedHandle {
     /// A real file opened under a portal.
-    Real { handle: SafeDropHandle, parent: OwnedProjectedPath },
+    Real {
+        handle: SafeDropHandle,
+        parent: OwnedProjectedPath,
+    },
     /// A projected file or directory that points to a real filesystem entry.
     Projected(SafeDropHandle),
     /// A directory with a canonical path in the projection tree.
@@ -76,8 +82,8 @@ impl FileSystemContext for ProjFsContext {
     fn get_security_by_name<P: AsRef<OsStr>>(
         &self,
         file_name: P,
-        security_descriptor: PSECURITY_DESCRIPTOR,
-        descriptor_len: Option<u64>,
+        _security_descriptor: PSECURITY_DESCRIPTOR,
+        _descriptor_len: Option<u64>,
     ) -> winfsp::Result<FileSecurity> {
         eprintln!("gsbn: {:?}", file_name.as_ref());
 
@@ -89,8 +95,7 @@ impl FileSystemContext for ProjFsContext {
             });
         }
 
-        if let Some((entry, remainder)) =
-        self.projections.search_entry(file_name.as_ref()) {
+        if let Some((entry, _remainder)) = self.projections.search_entry(file_name.as_ref()) {
             match entry {
                 // todo: need to get real shit.
                 ProjectionEntry::File { .. } => {}
@@ -115,8 +120,8 @@ impl FileSystemContext for ProjFsContext {
     fn open<P: AsRef<OsStr>>(
         &self,
         file_name: P,
-        create_options: u32,
-        granted_access: FILE_ACCESS_FLAGS,
+        _create_options: u32,
+        _granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
         eprintln!("open: {:?}", file_name.as_ref());
@@ -129,8 +134,7 @@ impl FileSystemContext for ProjFsContext {
             });
         }
 
-        if let Some((entry, remainder)) =
-            self.projections.search_entry(file_name.as_ref()) {
+        if let Some((entry, _remainder)) = self.projections.search_entry(file_name.as_ref()) {
             match entry {
                 ProjectionEntry::File { .. } => {}
                 ProjectionEntry::Directory { name, .. } => {
@@ -148,23 +152,26 @@ impl FileSystemContext for ProjFsContext {
         Err(ERROR_FILE_NOT_FOUND.into())
     }
 
-    fn close(&self, context: Self::FileContext) {}
+    fn close(&self, _context: Self::FileContext) {}
 
-    fn read_directory<P: Into<PCWSTR>>(&self, context: &mut Self::FileContext,
-                                       pattern: Option<P>,
-                                       marker: DirMarker,
-                                       buffer: &mut [u8]) -> winfsp::Result<u32> {
-        if let Ok(mut buffer) =
-            context.dir_buffer.acquire(marker.is_none(), None) {
+    fn read_directory<P: Into<PCWSTR>>(
+        &self,
+        context: &mut Self::FileContext,
+        _pattern: Option<P>,
+        marker: DirMarker,
+        buffer: &mut [u8],
+    ) -> winfsp::Result<u32> {
+        if let Ok(mut buffer) = context.dir_buffer.acquire(marker.is_none(), None) {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
 
             match &context.handle {
                 ProjectedHandle::Real { .. } => {}
-                ProjectedHandle::Projected(_) => {},
+                ProjectedHandle::Projected(_) => {}
                 ProjectedHandle::Directory(path) => {
                     if let Some(root_dir) = self.projections.get_children(path) {
                         for entry in root_dir {
-                            let filename = entry.file_name()
+                            let filename = entry
+                                .file_name()
                                 .expect("projection entry must have filename, can not be root.");
 
                             dirinfo.reset();
@@ -186,17 +193,16 @@ impl FileSystemContext for ProjFsContext {
                             }
                         }
                     }
-                },
+                }
             }
-
         }
 
         Ok(context.dir_buffer.read(marker, buffer))
     }
 
     fn get_volume_info(&self, out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> winfsp::Result<()> {
-        let mut total_size = 0u64;
-        let mut free_size = 0u64;
+        let total_size = 0u64;
+        let free_size = 0u64;
 
         out_volume_info.TotalSize = total_size;
         out_volume_info.FreeSize = free_size;
