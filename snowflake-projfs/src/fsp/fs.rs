@@ -131,10 +131,6 @@ impl FileSystemContext for ProjFsContext {
         })
     }
 
-    fn get_file_info(&self, context: &Self::FileContext, file_info: &mut FSP_FSCTL_FILE_INFO) -> winfsp::Result<()> {
-        self.get_file_info_internal(context, file_info)
-    }
-
     fn open<P: AsRef<OsStr>>(
         &self,
         file_name: P,
@@ -172,6 +168,22 @@ impl FileSystemContext for ProjFsContext {
     }
 
     fn close(&self, _context: Self::FileContext) {}
+
+    fn get_file_info(&self, context: &Self::FileContext, file_info: &mut FSP_FSCTL_FILE_INFO) -> winfsp::Result<()> {
+        self.get_file_info_internal(context, file_info)
+    }
+
+    fn get_volume_info(&self, out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> winfsp::Result<()> {
+        let total_size = 0u64;
+        let free_size = 0u64;
+
+        out_volume_info.TotalSize = total_size;
+        out_volume_info.FreeSize = free_size;
+        out_volume_info.VolumeLabel[0..VOLUME_LABEL.len()].copy_from_slice(VOLUME_LABEL.as_wide());
+        out_volume_info.VolumeLabelLength =
+            (VOLUME_LABEL.len() * std::mem::size_of::<u16>()) as u16;
+        Ok(())
+    }
 
     fn read_directory<P: Into<PCWSTR>>(
         &self,
@@ -274,18 +286,6 @@ impl FileSystemContext for ProjFsContext {
         }
 
         Ok(context.dir_buffer.read(marker, buffer))
-    }
-
-    fn get_volume_info(&self, out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> winfsp::Result<()> {
-        let total_size = 0u64;
-        let free_size = 0u64;
-
-        out_volume_info.TotalSize = total_size;
-        out_volume_info.FreeSize = free_size;
-        out_volume_info.VolumeLabel[0..VOLUME_LABEL.len()].copy_from_slice(VOLUME_LABEL.as_wide());
-        out_volume_info.VolumeLabelLength =
-            (VOLUME_LABEL.len() * std::mem::size_of::<u16>()) as u16;
-        Ok(())
     }
 }
 
