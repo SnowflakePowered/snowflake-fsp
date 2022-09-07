@@ -35,6 +35,15 @@ pub struct Projection {
 }
 
 impl Projection {
+    pub fn get_parent<'a, P: AsRef<ProjectedPath> + 'a>(
+        &'a self,
+        canonical_path: P,
+    ) -> Option<&ProjectionEntry> {
+        let path = canonical_path.as_ref();
+        path.parent()
+            .and_then(|parent| self.entries.get(parent))
+    }
+
     pub fn get_children<'a, P: AsRef<ProjectedPath> + 'a>(
         &'a self,
         canonical_path: P,
@@ -116,6 +125,8 @@ impl Projection {
                 req_iter.next();
             }
 
+            // The underlying iterator for the Peekable<Components> has already been advanced
+            // so we need to manually reconstitute the remainder path.
             let mut rest = PathBuf::new();
             for component in req_iter {
                 match component {
@@ -144,8 +155,6 @@ impl From<&[ProjectionEntry]> for Projection {
     fn from(parsed_projection: &[ProjectionEntry]) -> Self {
         let mut map = Trie::new();
 
-        // reverse since we want FIFO order.
-        // let mut projections: VecDeque<_> = VecDeque::from_iter(projection.iter());
         map.insert(
             OwnedProjectedPath::from("/"),
             ProjectionEntry::Directory {
@@ -181,11 +190,10 @@ impl ProjectionEntry {
         path.file_name()
     }
 
-    // Returns true if the entry is a portal or a directory.
+    // Returns true if the entry is a directory.
     pub fn is_directory(&self) -> bool {
         matches!(
-            self,
-            ProjectionEntry::Portal { .. } | ProjectionEntry::Directory { .. }
+            self, ProjectionEntry::Directory { .. }
         )
     }
 

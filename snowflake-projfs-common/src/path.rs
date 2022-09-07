@@ -86,6 +86,10 @@ impl OwnedProjectedPath {
     pub fn root() -> Self {
         OwnedProjectedPath::from(OwnedProjectedPath::ROOT)
     }
+
+    pub fn is_root(&self) -> bool {
+        self.0 == Self::ROOT
+    }
 }
 
 impl PartialEq<str> for OwnedProjectedPath {
@@ -109,6 +113,11 @@ impl ProjectedPath {
 
     pub fn as_path(&self) -> &Path {
         Path::new(&self.0)
+    }
+
+    pub fn parent(&self) -> Option<&ProjectedPath> {
+        let path = Path::new(&self.0);
+        path.parent().map(ProjectedPath::new)
     }
 }
 
@@ -161,7 +170,7 @@ impl AsRef<ProjectedPath> for OwnedProjectedPath {
 
 impl Borrow<[u8]> for ProjectedPath {
     fn borrow(&self) -> &[u8] {
-        #[cfg(target_os = "linix")]
+        #[cfg(target_os = "linux")]
         return std::os::unix::ffi::OsStrExt::as_bytes(&self.0);
 
         // !! crimes ahead !!

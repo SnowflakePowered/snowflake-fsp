@@ -1,19 +1,26 @@
 use snowflake_projfs_common::path::OwnedProjectedPath;
-use snowflake_projfs_common::projections::{Projection, ProjectionEntry};
-use std::ffi::OsStr;
+use snowflake_projfs_common::projections::{FileAccess, Projection, ProjectionEntry};
+
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::fs::{File, OpenOptions};
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::IntoRawHandle;
+use time::OffsetDateTime;
 
 use windows::core::{HSTRING, PCWSTR};
 use windows::w;
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, MAX_PATH};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, HANDLE, MAX_PATH, STATUS_INVALID_DEVICE_REQUEST};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{
-    FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
-};
+use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_VIRTUAL, FILE_FLAG_BACKUP_SEMANTICS};
 use winfsp::filesystem::{
     DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost,
     FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
 use winfsp::util::SafeDropHandle;
+
+use crate::fsp::util::{systemtime_to_filetime, win32_try};
 
 const ALLOCATION_UNIT: u16 = 4096;
 const VOLUME_LABEL: &HSTRING = w!("Snowflake");
@@ -27,6 +34,7 @@ pub struct SnowflakeProjFs {
 
 #[repr(C)]
 struct ProjFsContext {
+    start_time: OffsetDateTime,
     projections: Projection,
 }
 
@@ -48,22 +56,15 @@ pub struct ProjFsFileContext {
     dir_buffer: DirBuffer,
 }
 
-#[inline(always)]
-const fn quadpart(hi: u32, lo: u32) -> u64 {
-    (hi as u64) << 32 | lo as u64
-}
-
-macro_rules! win32_try {
-    (unsafe $e:expr) => {
-        if unsafe { !($e).as_bool() } {
-            return Err(::winfsp::error::FspError::from(unsafe { GetLastError() }));
-        }
-    };
-}
-
 impl ProjFsContext {
-    fn get_virtdir_file_info(file_info: &mut FSP_FSCTL_FILE_INFO) {
-        file_info.FileAttributes = FILE_ATTRIBUTE_DIRECTORY.0;
+    fn get_virtdir_file_info(&self, file_info: &mut FSP_FSCTL_FILE_INFO) {
+        file_info.FileAttributes = (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY).0;
+
+        file_info.LastAccessTime = systemtime_to_filetime(self.start_time);
+
+        file_info.LastWriteTime = file_info.LastAccessTime;
+        file_info.CreationTime = file_info.LastAccessTime;
+        file_info.ChangeTime = file_info.LastAccessTime;
 
         file_info.ReparseTag = 0;
         file_info.IndexNumber = 0;
@@ -73,6 +74,21 @@ impl ProjFsContext {
         file_info.AllocationSize = (file_info.FileSize + ALLOCATION_UNIT as u64 - 1)
             / ALLOCATION_UNIT as u64
             * ALLOCATION_UNIT as u64;
+    }
+
+    fn get_real_file_info() {
+
+    }
+    fn get_file_info_internal(&self, file: &ProjFsFileContext, file_info: &mut FSP_FSCTL_FILE_INFO) -> winfsp::Result<()>{
+        match file.handle {
+            ProjectedHandle::Real { .. } => {}
+            ProjectedHandle::Projected(_) => {}
+            ProjectedHandle::Directory(_) => {
+                self.get_virtdir_file_info(file_info)
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -85,8 +101,6 @@ impl FileSystemContext for ProjFsContext {
         _security_descriptor: PSECURITY_DESCRIPTOR,
         _descriptor_len: Option<u64>,
     ) -> winfsp::Result<FileSecurity> {
-        eprintln!("gsbn: {:?}", file_name.as_ref());
-
         if file_name.as_ref() == "\\" {
             return Ok(FileSecurity {
                 attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
@@ -117,6 +131,10 @@ impl FileSystemContext for ProjFsContext {
         })
     }
 
+    fn get_file_info(&self, context: &Self::FileContext, file_info: &mut FSP_FSCTL_FILE_INFO) -> winfsp::Result<()> {
+        self.get_file_info_internal(context, file_info)
+    }
+
     fn open<P: AsRef<OsStr>>(
         &self,
         file_name: P,
@@ -126,12 +144,12 @@ impl FileSystemContext for ProjFsContext {
     ) -> winfsp::Result<Self::FileContext> {
         eprintln!("open: {:?}", file_name.as_ref());
         if file_name.as_ref() == "\\" {
-            eprintln!("open: root");
-            Self::get_virtdir_file_info(file_info);
-            return Ok(Self::FileContext {
+            let context = Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
                 dir_buffer: Default::default(),
-            });
+            };
+            self.get_file_info_internal(&context, file_info)?;
+            return Ok(context);
         }
 
         if let Some((entry, _remainder)) = self.projections.search_entry(file_name.as_ref()) {
@@ -139,11 +157,12 @@ impl FileSystemContext for ProjFsContext {
                 ProjectionEntry::File { .. } => {}
                 ProjectionEntry::Directory { name, .. } => {
                     eprintln!("vd: {:?}", name);
-                    Self::get_virtdir_file_info(file_info);
-                    return Ok(Self::FileContext {
+                    let context = Self::FileContext {
                         handle: ProjectedHandle::Directory(name.clone()),
                         dir_buffer: Default::default(),
-                    });
+                    };
+                    self.get_file_info_internal(&context, file_info)?;
+                    return Ok(context);
                 }
                 ProjectionEntry::Portal { .. } => {}
             }
@@ -158,7 +177,7 @@ impl FileSystemContext for ProjFsContext {
         &self,
         context: &mut Self::FileContext,
         _pattern: Option<P>,
-        marker: DirMarker,
+        mut marker: DirMarker,
         buffer: &mut [u8],
     ) -> winfsp::Result<u32> {
         if let Ok(mut buffer) = context.dir_buffer.acquire(marker.is_none(), None) {
@@ -168,22 +187,79 @@ impl FileSystemContext for ProjFsContext {
                 ProjectedHandle::Real { .. } => {}
                 ProjectedHandle::Projected(_) => {}
                 ProjectedHandle::Directory(path) => {
-                    if let Some(root_dir) = self.projections.get_children(path) {
-                        for entry in root_dir {
+                    if !path.is_root() {
+                        if marker.is_none() {
+                            // add '.'
+                            dirinfo.reset();
+                            let finfo = dirinfo.file_info_mut();
+
+                            self.get_virtdir_file_info(finfo);
+                            dirinfo.set_file_name(".")?;
+                            buffer.write(&mut dirinfo)?;
+                        }
+
+                        if marker.is_none() || marker.is_current() {
+                            // add '..'
+                            dirinfo.reset();
+                            let finfo = dirinfo.file_info_mut();
+                            self.get_virtdir_file_info(finfo);
+                            dirinfo.set_file_name("..")?;
+                            buffer.write(&mut dirinfo)?;
+                            marker.reset();
+                        }
+                    }
+
+                    if let Some(directory) = self.projections.get_children(path) {
+                        for entry in directory {
+                            dirinfo.reset();
                             let filename = entry
                                 .file_name()
                                 .expect("projection entry must have filename, can not be root.");
 
-                            dirinfo.reset();
                             let finfo = dirinfo.file_info_mut();
 
-                            finfo.FileAttributes = if entry.is_directory() {
-                                FILE_ATTRIBUTE_DIRECTORY.0
-                            } else {
-                                // todo: fetch actual attributes
-                                FILE_ATTRIBUTE_NORMAL.0
-                            };
+                            match entry {
+                                ProjectionEntry::Portal { name, source, access, .. }
+                                    | ProjectionEntry::File { name, source, access } => {
+                                    if let Ok(metadata) = fs::metadata(source) {
+                                        finfo.FileSize = metadata.file_size();
+                                        finfo.FileAttributes = metadata.file_attributes();
+                                        finfo.CreationTime = metadata.creation_time();
+                                        finfo.LastAccessTime = metadata.last_access_time();
+                                        finfo.LastWriteTime = metadata.last_write_time();
+                                        finfo.ChangeTime = finfo.LastWriteTime;
 
+                                        // respect access flag
+                                        if access == &FileAccess::Read {
+                                            finfo.FileAttributes |= FILE_ATTRIBUTE_READONLY.0;
+                                        }
+                                    } else {
+                                        finfo.FileSize = 0;
+                                        finfo.FileAttributes = if entry.is_portal() {
+                                            FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_OFFLINE.0
+                                        } else {
+                                            // non-existent file
+                                            FILE_ATTRIBUTE_NORMAL.0 | FILE_ATTRIBUTE_OFFLINE.0 | FILE_ATTRIBUTE_READONLY.0
+                                        };
+                                        finfo.LastAccessTime = systemtime_to_filetime(self.start_time);
+                                        finfo.LastWriteTime = finfo.LastAccessTime;
+                                        finfo.CreationTime = finfo.LastAccessTime;
+                                        finfo.ChangeTime = finfo.LastAccessTime;
+                                    }
+
+                                    finfo.AllocationSize = (finfo.FileSize + ALLOCATION_UNIT as u64 - 1)
+                                        / ALLOCATION_UNIT as u64
+                                        * ALLOCATION_UNIT as u64;
+
+                                    finfo.HardLinks = 0;
+                                    finfo.ReparseTag = 0;
+                                    finfo.IndexNumber = 0;
+                                }
+
+                                ProjectionEntry::Directory { .. } => {
+                                    self.get_virtdir_file_info(finfo);
+                                }
+                            }
                             dirinfo.set_file_name(filename)?;
 
                             if let Err(e) = buffer.write(&mut dirinfo) {
@@ -245,6 +321,7 @@ impl SnowflakeProjFs {
             .copy_from_slice(&fs_name.as_wide()[..std::cmp::min(fs_name.len(), 192)]);
 
         let context = ProjFsContext {
+            start_time: OffsetDateTime::now_utc(),
             projections: Projection::from(projections.as_slice()),
         };
 
