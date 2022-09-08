@@ -1,4 +1,3 @@
-
 use crate::path::{OwnedProjectedPath, ProjectedPath};
 use qp_trie::Trie;
 use std::ffi::OsStr;

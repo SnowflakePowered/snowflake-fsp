@@ -1,4 +1,3 @@
-
 use qp_trie::Break;
 use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};
@@ -17,6 +16,7 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// When searching for a path segment in the Projection, always search from
 /// longest to shortest match.
+#[allow(dead_code)]
 fn canonicalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OwnedProjectedPath> {
     let path: Vec<Component> = path.as_ref().components().collect();
     if path.len() == 1 && path[0] == Component::RootDir {

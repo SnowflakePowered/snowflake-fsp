@@ -1,30 +1,36 @@
 use snowflake_projfs_common::path::OwnedProjectedPath;
 use snowflake_projfs_common::projections::{FileAccess, Projection, ProjectionEntry};
 
-use std::ffi::{OsStr};
+use std::ffi::OsStr;
 use std::fs;
-use std::fs::{OpenOptions};
+use std::fs::{DirEntry, OpenOptions};
+use std::io::ErrorKind;
+use std::mem::MaybeUninit;
 use std::ops::Deref;
 
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
+use std::path::Path;
 use time::OffsetDateTime;
 use widestring::{u16cstr, U16String};
 
 use windows::core::{HSTRING, PCWSTR};
 use windows::w;
-use windows::Win32::Foundation::{GetLastError, ERROR_DIRECTORY, ERROR_FILE_OFFLINE, HANDLE, MAX_PATH, ERROR_ACCESS_DENIED};
+use windows::Win32::Foundation::{
+    GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
+    HANDLE, MAX_PATH,
+};
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW, ReadFile,
-    BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
+    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle,
+    GetFinalPathNameByHandleW, ReadFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
     FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
@@ -143,6 +149,40 @@ impl ProjFsContext {
 
         Ok(())
     }
+
+    fn get_real_file_security_by_name<P: AsRef<Path>>(
+        path: P,
+        security_descriptor: PSECURITY_DESCRIPTOR,
+        descriptor_len: Option<u64>,
+    ) -> winfsp::Result<FileSecurity> {
+        let mut opt = OpenOptions::new();
+        opt.access_mode(FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0);
+        opt.custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0);
+
+        let f = opt.open(path)?;
+        let metadata = f.metadata()?;
+        let handle = HANDLE(f.into_raw_handle() as isize);
+
+        let mut len_needed = 0;
+        if let Some(descriptor_len) = descriptor_len {
+            win32_try!(unsafe GetKernelObjectSecurity(
+                handle,
+                (OWNER_SECURITY_INFORMATION
+                    | GROUP_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION)
+                    .0,
+                security_descriptor,
+                descriptor_len as u32,
+                &mut len_needed,
+            ));
+        }
+
+        Ok(FileSecurity {
+            attributes: metadata.file_attributes(),
+            reparse: false,
+            sz_security_descriptor: len_needed as u64,
+        })
+    }
 }
 
 impl FileSystemContext for ProjFsContext {
@@ -163,56 +203,41 @@ impl FileSystemContext for ProjFsContext {
         }
 
         if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
-            match (entry, remainder) {
+            return match (entry, remainder) {
                 (ProjectionEntry::File { source, .. }, _)
                 | (ProjectionEntry::Portal { source, .. }, None) => {
-                    eprintln!("gsbn: {:?}", source);
-                    let mut opt = OpenOptions::new();
-                    opt.access_mode(FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0);
-                    opt.custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0);
-
-                    let f = opt.open(source)?;
-                    let metadata = f.metadata()?;
-                    eprintln!("fm");
-                    let handle = HANDLE(f.into_raw_handle() as isize);
-
-                    let mut len_needed = 0;
-                    if let Some(descriptor_len) = descriptor_len {
-                        win32_try!(unsafe GetKernelObjectSecurity(
-                            handle,
-                            (OWNER_SECURITY_INFORMATION
-                                | GROUP_SECURITY_INFORMATION
-                                | DACL_SECURITY_INFORMATION)
-                                .0,
-                            security_descriptor,
-                            descriptor_len as u32,
-                            &mut len_needed,
-                        ));
-                    }
-
-                    return Ok(FileSecurity {
-                        attributes: metadata.file_attributes(),
-                        reparse: false,
-                        sz_security_descriptor: len_needed as u64,
-                    });
+                    Self::get_real_file_security_by_name(
+                        source,
+                        security_descriptor,
+                        descriptor_len,
+                    )
+                    // FspError coerces to Win32 whenever possible.
+                    .map_err(|e| {
+                        if matches!(e, FspError::WIN32(ERROR_FILE_NOT_FOUND)) {
+                            FspError::WIN32(ERROR_FILE_OFFLINE)
+                        } else {
+                            e
+                        }
+                    })
                 }
-                (ProjectionEntry::Directory { .. }, _) => {
-                    return Ok(FileSecurity {
-                        attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
-                        reparse: false,
-                        sz_security_descriptor: 0,
-                    });
+                (ProjectionEntry::Directory { .. }, _) => Ok(FileSecurity {
+                    attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
+                    reparse: false,
+                    sz_security_descriptor: 0,
+                }),
+                (ProjectionEntry::Portal { source, .. }, Some(remainder)) => {
+                    // todo: adjust attributes for ro protectlist
+                    eprintln!("fullpath {:?}", source.join(&remainder));
+                    Self::get_real_file_security_by_name(
+                        source.join(&remainder),
+                        security_descriptor,
+                        descriptor_len,
+                    )
                 }
-                // todo: portal...
-                (ProjectionEntry::Portal { .. }, Some(_remainder)) => {}
-            }
+            };
         }
 
-        Ok(FileSecurity {
-            attributes: 0,
-            reparse: false,
-            sz_security_descriptor: 0,
-        })
+        Err(ERROR_FILE_NOT_FOUND.into())
     }
 
     fn open<P: AsRef<OsStr>>(
@@ -222,7 +247,6 @@ impl FileSystemContext for ProjFsContext {
         mut granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
-        eprintln!("open: {:?}", file_name.as_ref());
         if file_name.as_ref() == "\\" {
             let context = Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
@@ -252,7 +276,7 @@ impl FileSystemContext for ProjFsContext {
                     },
                     None,
                 ) => {
-                    eprintln!("f: {:?}", name);
+                    eprintln!("open: {:?}", name);
                     let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
                     if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
                         create_flags |= FILE_FLAG_DELETE_ON_CLOSE
@@ -307,6 +331,31 @@ impl FileSystemContext for ProjFsContext {
     }
 
     fn close(&self, _context: Self::FileContext) {}
+
+    fn create<P: AsRef<OsStr>>(
+        &self,
+        file_name: P,
+        _create_options: u32,
+        _granted_access: FILE_ACCESS_FLAGS,
+        _file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
+        _security_descriptor: PSECURITY_DESCRIPTOR,
+        _allocation_size: u64,
+        _extra_buffer: Option<&[u8]>,
+        _extra_buffer_is_reparse_point: bool,
+        _file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> winfsp::Result<Self::FileContext> {
+        if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
+            match (entry, remainder) {
+                (ProjectionEntry::Portal { .. }, Some(remainder)) => {
+                    eprintln!("{:?}", remainder)
+                }
+                _ => {
+                    return Err(ERROR_ACCESS_DENIED.into());
+                }
+            }
+        }
+        Err(ERROR_ACCESS_DENIED.into())
+    }
 
     fn get_file_info(
         &self,
@@ -403,10 +452,9 @@ impl FileSystemContext for ProjFsContext {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
 
             match &context.handle {
-                ProjectedHandle::Real { handle, .. }
-                    | ProjectedHandle::Projected(handle) => {
+                ProjectedHandle::Real { handle, .. } | ProjectedHandle::Projected(handle) => {
                     let mut full_path = [0; FULLPATH_SIZE];
-                    let mut length = unsafe {
+                    let length = unsafe {
                         let length = GetFinalPathNameByHandleW(
                             *handle.deref(),
                             &mut full_path[0..FULLPATH_SIZE - 1],
@@ -418,17 +466,30 @@ impl FileSystemContext for ProjFsContext {
                         length
                     };
 
-                    // append '\\' if needed.
-                    if full_path[length as usize - 1] != '\\' as u16 {
-                        full_path[length as usize..][0..2]
-                            .copy_from_slice(u16cstr!("\\").as_slice_with_nul());
-                        length += 1;
-                    }
-
                     let full_path =
                         unsafe { U16String::from_ptr(&full_path as *const u16, length as usize) };
 
-                    eprintln!("readdir {:?}", full_path);
+                    let readdir = fs::read_dir(full_path.to_os_string())?;
+                    for entry in readdir {
+                        dirinfo.reset();
+                        let entry = entry?;
+                        let find_data = entry.metadata()?;
+                        let finfo = dirinfo.file_info_mut();
+                        finfo.FileAttributes = find_data.file_attributes();
+                        finfo.ReparseTag = 0;
+                        finfo.FileSize = find_data.file_size();
+                        finfo.AllocationSize = ((finfo.FileSize + ALLOCATION_UNIT as u64 - 1)
+                            / ALLOCATION_UNIT as u64)
+                            * ALLOCATION_UNIT as u64;
+                        finfo.CreationTime = find_data.creation_time();
+                        finfo.LastAccessTime = find_data.last_access_time();
+                        finfo.LastWriteTime = find_data.last_write_time();
+                        finfo.ChangeTime = finfo.LastWriteTime;
+                        finfo.HardLinks = 0;
+                        finfo.IndexNumber = 0;
+                        dirinfo.set_file_name(entry.file_name())?;
+                        buffer.write(&mut dirinfo)?;
+                    }
                 }
                 ProjectedHandle::Directory(path) => {
                     if !path.is_root() {
@@ -529,29 +590,6 @@ impl FileSystemContext for ProjFsContext {
         }
 
         Ok(context.dir_buffer.read(marker, buffer))
-    }
-
-    fn create<P: AsRef<OsStr>>(
-        &self,
-        file_name: P,
-        _create_options: u32,
-        _granted_access: FILE_ACCESS_FLAGS,
-        _file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
-        _security_descriptor: PSECURITY_DESCRIPTOR,
-        _allocation_size: u64,
-        _extra_buffer: Option<&[u8]>,
-        _extra_buffer_is_reparse_point: bool,
-        _file_info: &mut FSP_FSCTL_FILE_INFO,
-    ) -> winfsp::Result<Self::FileContext> {
-        if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
-            match (entry, remainder) {
-                (ProjectionEntry::Portal { .. }, Some(remainder)) => {
-                    eprintln!("{:?}", remainder)
-                }
-                _ => { return Err(ERROR_ACCESS_DENIED.into()); }
-            }
-        }
-        Err(ERROR_ACCESS_DENIED.into())
     }
 }
 
