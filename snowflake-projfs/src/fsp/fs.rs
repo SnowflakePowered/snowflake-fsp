@@ -131,7 +131,10 @@ impl ProjFsContext {
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<()> {
         match &file.handle {
-            ProjectedHandle::Real { .. } => {}
+            ProjectedHandle::Real { handle, .. } => {
+                // todo: check against protectlist for r/o
+                Self::get_real_file_info(*handle.deref(), file_info)?
+            }
             ProjectedHandle::Projected(handle) => {
                 Self::get_real_file_info(*handle.deref(), file_info)?
             }
@@ -333,6 +336,7 @@ impl FileSystemContext for ProjFsContext {
                     &mut descriptor_size_needed,
                 ));
             }
+            // todo: fake a dacl for virtdirs
             ProjectedHandle::Directory(_) => {}
         }
 
@@ -399,8 +403,8 @@ impl FileSystemContext for ProjFsContext {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
 
             match &context.handle {
-                ProjectedHandle::Real { .. } => {}
-                ProjectedHandle::Projected(handle) => {
+                ProjectedHandle::Real { handle, .. }
+                    | ProjectedHandle::Projected(handle) => {
                     let mut full_path = [0; FULLPATH_SIZE];
                     let mut length = unsafe {
                         let length = GetFinalPathNameByHandleW(
