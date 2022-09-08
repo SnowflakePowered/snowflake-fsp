@@ -1,3 +1,4 @@
+
 use qp_trie::Break;
 use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};
@@ -16,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// When searching for a path segment in the Projection, always search from
 /// longest to shortest match.
-pub fn canonicalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OwnedProjectedPath> {
+fn canonicalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OwnedProjectedPath> {
     let path: Vec<Component> = path.as_ref().components().collect();
     if path.len() == 1 && path[0] == Component::RootDir {
         return vec![OwnedProjectedPath::root()];
@@ -44,7 +45,7 @@ pub fn canonicalize_path_segments<P: AsRef<Path>>(path: P) -> Vec<OwnedProjected
 }
 
 // canonicalize the path in place?
-pub fn canonicalize_path<P: AsRef<Path>>(path: P) -> OwnedProjectedPath {
+fn canonicalize_path<P: AsRef<Path>>(path: P) -> OwnedProjectedPath {
     let path: Vec<Component> = path.as_ref().components().collect();
     if path.len() == 1 && path[0] == Component::RootDir {
         return OwnedProjectedPath::root();
@@ -81,46 +82,6 @@ pub fn canonicalize_path<P: AsRef<Path>>(path: P) -> OwnedProjectedPath {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct OwnedProjectedPath(OsString);
 
-impl OwnedProjectedPath {
-    pub const ROOT: &'static str = "/";
-    pub fn root() -> Self {
-        OwnedProjectedPath::from(OwnedProjectedPath::ROOT)
-    }
-
-    pub fn is_root(&self) -> bool {
-        self.0 == Self::ROOT
-    }
-}
-
-impl PartialEq<str> for OwnedProjectedPath {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct ProjectedPath(OsStr);
-
-impl ProjectedPath {
-    pub fn root() -> &'static ProjectedPath {
-        ProjectedPath::new("/")
-    }
-
-    pub fn new<S: AsRef<OsStr> + ?Sized>(s: &S) -> &ProjectedPath {
-        unsafe { &*(s.as_ref() as *const OsStr as *const ProjectedPath) }
-    }
-
-    pub fn as_path(&self) -> &Path {
-        Path::new(&self.0)
-    }
-
-    pub fn parent(&self) -> Option<&ProjectedPath> {
-        let path = Path::new(&self.0);
-        path.parent().map(ProjectedPath::new)
-    }
-}
-
 impl Deref for OwnedProjectedPath {
     type Target = ProjectedPath;
 
@@ -141,6 +102,97 @@ where
 impl Borrow<ProjectedPath> for OwnedProjectedPath {
     fn borrow(&self) -> &ProjectedPath {
         self.deref()
+    }
+}
+
+impl Borrow<[u8]> for OwnedProjectedPath {
+    fn borrow(&self) -> &[u8] {
+        #[cfg(target_os = "linux")]
+        return std::os::unix::ffi::OsStrExt::as_bytes(&self.0);
+
+        // !! crimes ahead !!
+        // SAFETY: the resultant encoding is unspecified and can change between compilations.
+        #[cfg(target_os = "windows")]
+        unsafe {
+            std::mem::transmute(self.0.as_os_str())
+        }
+    }
+}
+
+impl PartialEq<&str> for OwnedProjectedPath {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.eq(other)
+    }
+}
+
+impl PartialEq<str> for OwnedProjectedPath {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl Break for OwnedProjectedPath {
+    type Split = [u8];
+
+    fn empty<'a>() -> &'a Self::Split {
+        <&'a [u8]>::default()
+    }
+
+    fn find_break(&self, loc: usize) -> &Self::Split {
+        &<Self as Borrow<[u8]>>::borrow(self)[..loc]
+    }
+}
+
+impl OwnedProjectedPath {
+    /// The canonical root path of the projection.
+    pub const ROOT: &'static str = "/";
+
+    /// A root OwnedProjectedPath.
+    pub fn root() -> Self {
+        OwnedProjectedPath::from(OwnedProjectedPath::ROOT)
+    }
+
+    /// Returns whether or not the path is at the root of the projection.
+    pub fn is_root(&self) -> bool {
+        self.0 == Self::ROOT
+    }
+
+    /// Returns the `ProjectedPath` without its final component, if there is one.
+    pub fn parent(&self) -> Option<&ProjectedPath> {
+        let path = Path::new(&self.0);
+        path.parent().map(ProjectedPath::new)
+    }
+
+    /// Create a new `OwnedProjectedPath` in canonical format.
+    pub fn new_canonical<P: AsRef<Path>>(path: P) -> Self {
+        canonicalize_path(path)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ProjectedPath(OsStr);
+
+impl ProjectedPath {
+    /// Returns whether or not the path is at the root of the projection.
+    pub fn root() -> &'static ProjectedPath {
+        ProjectedPath::new("/")
+    }
+
+    /// Creates a new path from a referenced `OsStr`.
+    pub fn new<S: AsRef<OsStr> + ?Sized>(s: &S) -> &ProjectedPath {
+        unsafe { &*(s.as_ref() as *const OsStr as *const ProjectedPath) }
+    }
+
+    /// Converts to a `Path`.
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+
+    /// Returns the `ProjectedPath` without its final component, if there is one.
+    pub fn parent(&self) -> Option<&ProjectedPath> {
+        let path = Path::new(&self.0);
+        path.parent().map(ProjectedPath::new)
     }
 }
 
@@ -184,45 +236,6 @@ impl Borrow<[u8]> for ProjectedPath {
         unsafe {
             std::mem::transmute(&self.0)
         }
-    }
-}
-
-impl Borrow<[u8]> for OwnedProjectedPath {
-    fn borrow(&self) -> &[u8] {
-        #[cfg(target_os = "linux")]
-        return std::os::unix::ffi::OsStrExt::as_bytes(&self.0);
-
-        // !! crimes ahead !!
-        // SAFETY: the resultant encoding is unspecified and can change between compilations.
-        #[cfg(target_os = "windows")]
-        unsafe {
-            std::mem::transmute(self.0.as_os_str())
-        }
-    }
-}
-
-impl Break for OwnedProjectedPath {
-    type Split = [u8];
-
-    fn empty<'a>() -> &'a Self::Split {
-        <&'a [u8]>::default()
-    }
-
-    fn find_break(&self, loc: usize) -> &Self::Split {
-        &<Self as Borrow<[u8]>>::borrow(self)[..loc]
-    }
-}
-
-impl OwnedProjectedPath {
-    pub fn parent(&self) -> Option<&ProjectedPath> {
-        let path = Path::new(&self.0);
-        path.parent().map(ProjectedPath::new)
-    }
-}
-
-impl PartialEq<&str> for OwnedProjectedPath {
-    fn eq(&self, other: &&str) -> bool {
-        self.0.eq(other)
     }
 }
 

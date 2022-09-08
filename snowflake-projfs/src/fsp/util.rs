@@ -1,4 +1,3 @@
-
 macro_rules! win32_try {
     (unsafe $e:expr) => {
         if unsafe { !($e).as_bool() } {
@@ -7,9 +6,9 @@ macro_rules! win32_try {
     };
 }
 use time::{Month, OffsetDateTime, Weekday};
+pub(crate) use win32_try;
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows::Win32::System::Time::SystemTimeToFileTime;
-pub(crate) use win32_try;
 
 #[inline(always)]
 pub const fn quadpart_to_u64(hi: u32, lo: u32) -> u64 {
@@ -29,7 +28,7 @@ pub fn systemtime_to_filetime(time: OffsetDateTime) -> u64 {
         wHour: time.hour() as u16,
         wMinute: time.minute() as u16,
         wSecond: time.second() as u16,
-        wMilliseconds: time.millisecond()
+        wMilliseconds: time.millisecond(),
     };
 
     let mut ftime = FILETIME::default();
@@ -53,7 +52,7 @@ const fn time_month_to_u16(m: Month) -> u16 {
         Month::September => 9,
         Month::October => 10,
         Month::November => 11,
-        Month::December => 12
+        Month::December => 12,
     }
 }
 

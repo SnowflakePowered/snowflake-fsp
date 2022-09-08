@@ -7,6 +7,7 @@ pub fn svc_start(args: Args) -> anyhow::Result<SnowflakeProjFs> {
     let projection = "
 f(/hello.world|C:\\test.txt|r);
 f(/extant.file|C:\\test\\test.txt|r);
+f(/extant.file.writable|C:\\test\\test.txt|rw);
 d(/directory|);
 d(/dir2|);
 d(/あ|);

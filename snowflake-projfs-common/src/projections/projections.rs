@@ -1,4 +1,4 @@
-use crate::path;
+
 use crate::path::{OwnedProjectedPath, ProjectedPath};
 use qp_trie::Trie;
 use std::ffi::OsStr;
@@ -40,8 +40,7 @@ impl Projection {
         canonical_path: P,
     ) -> Option<&ProjectionEntry> {
         let path = canonical_path.as_ref();
-        path.parent()
-            .and_then(|parent| self.entries.get(parent))
+        path.parent().and_then(|parent| self.entries.get(parent))
     }
 
     pub fn get_children<'a, P: AsRef<ProjectedPath> + 'a>(
@@ -98,7 +97,7 @@ impl Projection {
             return None;
         }
 
-        let full_path = path::canonicalize_path(path.as_ref());
+        let full_path = OwnedProjectedPath::new_canonical(path.as_ref());
 
         if let Some(entry) = self.entries.get(&full_path) {
             return Some((entry, None));
@@ -192,9 +191,7 @@ impl ProjectionEntry {
 
     // Returns true if the entry is a directory.
     pub fn is_directory(&self) -> bool {
-        matches!(
-            self, ProjectionEntry::Directory { .. }
-        )
+        matches!(self, ProjectionEntry::Directory { .. })
     }
 
     pub fn is_portal(&self) -> bool {
