@@ -20,11 +20,13 @@ use windows::Win32::Foundation::{
     GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
     HANDLE, MAX_PATH,
 };
+use windows::Win32::Security::Authorization::{
+    ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1,
+};
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
-use windows::Win32::Security::Authorization::{ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle,
     GetFinalPathNameByHandleW, ReadFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS,
@@ -184,6 +186,43 @@ impl ProjFsContext {
             sz_security_descriptor: len_needed as u64,
         })
     }
+
+    fn open_handle_internal<P: Into<HSTRING>>(
+        file_path: P,
+        create_options: u32,
+        mut granted_access: FILE_ACCESS_FLAGS,
+        request_access: FileAccess,
+    ) -> winfsp::Result<HANDLE> {
+        let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
+        if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
+            create_flags |= FILE_FLAG_DELETE_ON_CLOSE
+        }
+
+        if request_access == FileAccess::Read {
+            // remove write access to the file.
+            granted_access = FILE_GENERIC_EXECUTE | FILE_GENERIC_READ;
+        }
+
+        let file_path = file_path.into();
+
+        let handle = unsafe {
+            let handle = CreateFileW(
+                PCWSTR(file_path.as_ptr()),
+                granted_access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                create_flags,
+                None,
+            )?;
+            if handle.is_invalid() {
+                return Err(FspError::from(GetLastError()));
+            }
+            handle
+        };
+
+        Ok(handle)
+    }
 }
 
 impl FileSystemContext for ProjFsContext {
@@ -231,9 +270,9 @@ impl FileSystemContext for ProjFsContext {
                     Ok(FileSecurity {
                         attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
                         reparse: false,
-                        sz_security_descriptor: sz_security_descriptor as u64
+                        sz_security_descriptor: sz_security_descriptor as u64,
                     })
-                },
+                }
                 (ProjectionEntry::Portal { source, .. }, Some(remainder)) => {
                     // todo: adjust attributes for ro protectlist
                     eprintln!("fullpath {:?}", source.join(&remainder));
@@ -285,34 +324,13 @@ impl FileSystemContext for ProjFsContext {
                     },
                     None,
                 ) => {
-                    eprintln!("open: {:?}", name);
-                    let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
-                    if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
-                        create_flags |= FILE_FLAG_DELETE_ON_CLOSE
-                    }
-
-                    if access == &FileAccess::Read {
-                        // remove write access to the file.
-                        granted_access = FILE_GENERIC_EXECUTE | FILE_GENERIC_READ;
-                    }
-
                     let file_path = HSTRING::from(source.as_os_str());
-                    let handle = unsafe {
-                        let handle = CreateFileW(
-                            PCWSTR(file_path.as_ptr()),
-                            granted_access,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            std::ptr::null(),
-                            OPEN_EXISTING,
-                            create_flags,
-                            None,
-                        )?;
-                        if handle.is_invalid() {
-                            return Err(FspError::from(GetLastError()));
-                        }
-                        handle
-                    };
-
+                    let handle = Self::open_handle_internal(
+                        file_path,
+                        create_options,
+                        granted_access,
+                        *access,
+                    )?;
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Projected(SafeDropHandle::from(handle)),
                         dir_buffer: Default::default(),
@@ -330,8 +348,35 @@ impl FileSystemContext for ProjFsContext {
                     self.get_file_info_internal(&context, file_info)?;
                     return Ok(context);
                 }
-                (ProjectionEntry::Portal { source: _, .. }, Some(remainder)) => {
-                    eprintln!("remainder: {:?}", remainder);
+                (
+                    ProjectionEntry::Portal {
+                        source,
+                        name,
+                        access,
+                        ..
+                    },
+                    Some(remainder),
+                ) => {
+                    let file_path = source.join(remainder);
+                    let file_path = HSTRING::from(file_path.as_os_str());
+
+                    // todo: check with protectlist.
+                    let handle = Self::open_handle_internal(
+                        file_path,
+                        create_options,
+                        granted_access,
+                        *access,
+                    )?;
+                    let context = Self::FileContext {
+                        handle: ProjectedHandle::Real {
+                            handle: SafeDropHandle::from(handle),
+                            parent: name.clone(),
+                        },
+                        dir_buffer: Default::default(),
+                    };
+
+                    self.get_file_info_internal(&context, file_info)?;
+                    return Ok(context);
                 }
             }
         }
@@ -356,6 +401,7 @@ impl FileSystemContext for ProjFsContext {
         if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
             match (entry, remainder) {
                 (ProjectionEntry::Portal { .. }, Some(remainder)) => {
+                    // todo: create
                     eprintln!("{:?}", remainder)
                 }
                 _ => {
@@ -395,7 +441,10 @@ impl FileSystemContext for ProjFsContext {
                 ));
             }
             ProjectedHandle::Directory(_) => {
-                descriptor_size_needed = winfsp::util::get_process_security(security_descriptor, descriptor_len.map(|d| d as u32))?
+                descriptor_size_needed = winfsp::util::get_process_security(
+                    security_descriptor,
+                    descriptor_len.map(|d| d as u32),
+                )?
             }
         }
 

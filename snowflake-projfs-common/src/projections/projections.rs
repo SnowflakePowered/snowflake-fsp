@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum FileAccess {
     Read,
     ReadWrite,

@@ -1,7 +1,9 @@
 macro_rules! win32_try {
     (unsafe $e:expr) => {
         if unsafe { !($e).as_bool() } {
-            return Err(::winfsp::error::FspError::from(unsafe { ::windows::Win32::Foundation::GetLastError() }));
+            return Err(::winfsp::error::FspError::from(unsafe {
+                ::windows::Win32::Foundation::GetLastError()
+            }));
         }
     };
 }
