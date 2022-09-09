@@ -14,7 +14,7 @@ use std::path::Path;
 use time::OffsetDateTime;
 use widestring::{u16cstr, U16String};
 
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCWSTR, PSTR};
 use windows::w;
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
@@ -24,6 +24,7 @@ use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
+use windows::Win32::Security::Authorization::{ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle,
     GetFinalPathNameByHandleW, ReadFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS,
@@ -220,11 +221,19 @@ impl FileSystemContext for ProjFsContext {
                         }
                     })
                 }
-                (ProjectionEntry::Directory { .. }, _) => Ok(FileSecurity {
-                    attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
-                    reparse: false,
-                    sz_security_descriptor: 0,
-                }),
+                (ProjectionEntry::Directory { .. }, _) => {
+                    let sz_security_descriptor = if let Some(d) = descriptor_len {
+                        winfsp::util::get_process_security(security_descriptor, Some(d as u32))?
+                    } else {
+                        0
+                    };
+
+                    Ok(FileSecurity {
+                        attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
+                        reparse: false,
+                        sz_security_descriptor: sz_security_descriptor as u64
+                    })
+                },
                 (ProjectionEntry::Portal { source, .. }, Some(remainder)) => {
                     // todo: adjust attributes for ro protectlist
                     eprintln!("fullpath {:?}", source.join(&remainder));
@@ -385,8 +394,9 @@ impl FileSystemContext for ProjFsContext {
                     &mut descriptor_size_needed,
                 ));
             }
-            // todo: fake a dacl for virtdirs
-            ProjectedHandle::Directory(_) => {}
+            ProjectedHandle::Directory(_) => {
+                descriptor_size_needed = winfsp::util::get_process_security(security_descriptor, descriptor_len.map(|d| d as u32))?
+            }
         }
 
         Ok(descriptor_size_needed as u64)

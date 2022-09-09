@@ -10,6 +10,7 @@ f(/extant.file|C:\\test\\test.txt|r);
 f(/extant.file.writable|C:\\test\\test.txt|rw);
 d(/directory|);
 d(/dir2|);
+d(/dir2/dir2nested|);
 d(/あ|);
 p(/portal|C:\\test|rw|protected:file:|);
 p(/dead_portal|C:\\nope|rw|protected:file:|);
