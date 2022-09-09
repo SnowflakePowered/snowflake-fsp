@@ -1,9 +1,9 @@
-use crate::fsp::fs::SnowflakeProjFs;
+use crate::fsp::host::ProjFsHost;
 use crate::Args;
 use snowflake_projfs_common::projections::parse_projection;
 
 #[inline]
-pub fn svc_start(args: Args) -> anyhow::Result<SnowflakeProjFs> {
+pub fn svc_start(args: Args) -> anyhow::Result<ProjFsHost> {
     let projection = "
 f(/hello.world|C:\\test.txt|r);
 f(/extant.file|C:\\test\\test.txt|r);
@@ -21,7 +21,7 @@ f(/dir2/d1|C:\\test.txt|r);
     let parsed = parse_projection(projection.as_bytes()).unwrap();
     eprintln!("{:?}", parsed);
     let mut projfs =
-        SnowflakeProjFs::create(parsed, &args.volume_prefix.unwrap_or(String::from("")))?;
+        ProjFsHost::create(parsed, &args.volume_prefix.unwrap_or(String::from("")))?;
 
     projfs.fs.mount(args.mountpoint.as_os_str())?;
     projfs.fs.start()?;
@@ -29,7 +29,7 @@ f(/dir2/d1|C:\\test.txt|r);
 }
 
 #[inline]
-pub fn svc_stop(fs: Option<&mut SnowflakeProjFs>) {
+pub fn svc_stop(fs: Option<&mut ProjFsHost>) {
     if let Some(f) = fs {
         f.fs.stop();
     }

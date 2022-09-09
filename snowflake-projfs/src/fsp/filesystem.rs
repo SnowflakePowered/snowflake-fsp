@@ -17,47 +17,38 @@ use widestring::{u16cstr, U16String};
 use windows::core::{HSTRING, PCWSTR, PSTR};
 use windows::w;
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
+    ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE, GetLastError,
     HANDLE, MAX_PATH,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
+    DACL_SECURITY_INFORMATION, GetKernelObjectSecurity, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle,
-    GetFinalPathNameByHandleW, ReadFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
-    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
+    FILE_ATTRIBUTE_READONLY, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle,
+    GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, ReadFile, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 use winfsp::error::FspError;
 use winfsp::filesystem::{
-    DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, IoResult,
-    FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
+    DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO,
+    FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS, IoResult,
 };
 use winfsp::util::SafeDropHandle;
+use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
 
 use crate::fsp::util::{quadpart_to_u64, systemtime_to_filetime, win32_try};
 
-const ALLOCATION_UNIT: u16 = 4096;
-const VOLUME_LABEL: &HSTRING = w!("Snowflake");
-const FULLPATH_SIZE: usize = MAX_PATH as usize
-    + (winfsp::filesystem::constants::FSP_FSCTL_TRANSACT_PATH_SIZEMAX as usize
-        / std::mem::size_of::<u16>());
-
-pub struct SnowflakeProjFs {
-    pub fs: FileSystemHost,
-}
-
 #[repr(C)]
-struct ProjFsContext {
+pub struct ProjFsContext {
     start_time: OffsetDateTime,
     projections: Projection,
 }
@@ -81,6 +72,13 @@ pub struct ProjFsFileContext {
 }
 
 impl ProjFsContext {
+    pub(crate) fn new(projections: Projection) -> Self {
+        ProjFsContext {
+            start_time: OffsetDateTime::now_utc(),
+            projections,
+        }
+    }
+    
     fn get_virtdir_file_info(&self, file_info: &mut FSP_FSCTL_FILE_INFO) {
         file_info.FileAttributes = (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY).0;
 
@@ -292,7 +290,7 @@ impl FileSystemContext for ProjFsContext {
         &self,
         file_name: P,
         create_options: u32,
-        mut granted_access: FILE_ACCESS_FLAGS,
+        granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
         if file_name.as_ref() == "\\" {
@@ -305,10 +303,9 @@ impl FileSystemContext for ProjFsContext {
         }
 
         if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
-            match (entry, remainder) {
+            return match (entry, remainder) {
                 (
                     ProjectionEntry::File {
-                        name,
                         source,
                         access,
                         ..
@@ -317,7 +314,6 @@ impl FileSystemContext for ProjFsContext {
                 )
                 | (
                     ProjectionEntry::Portal {
-                        name,
                         source,
                         access,
                         ..
@@ -337,7 +333,7 @@ impl FileSystemContext for ProjFsContext {
                     };
 
                     self.get_file_info_internal(&context, file_info)?;
-                    return Ok(context);
+                    Ok(context)
                 }
                 (ProjectionEntry::Directory { name, .. }, _) => {
                     eprintln!("vd: {:?}", name);
@@ -346,7 +342,7 @@ impl FileSystemContext for ProjFsContext {
                         dir_buffer: Default::default(),
                     };
                     self.get_file_info_internal(&context, file_info)?;
-                    return Ok(context);
+                    Ok(context)
                 }
                 (
                     ProjectionEntry::Portal {
@@ -376,7 +372,7 @@ impl FileSystemContext for ProjFsContext {
                     };
 
                     self.get_file_info_internal(&context, file_info)?;
-                    return Ok(context);
+                    Ok(context)
                 }
             }
         }
@@ -649,49 +645,5 @@ impl FileSystemContext for ProjFsContext {
         }
 
         Ok(context.dir_buffer.read(marker, buffer))
-    }
-}
-
-impl SnowflakeProjFs {
-    pub fn create(
-        projections: Vec<ProjectionEntry>,
-        volume_prefix: &str,
-    ) -> anyhow::Result<SnowflakeProjFs> {
-        let mut volume_params = FSP_FSCTL_VOLUME_PARAMS {
-            SectorSize: ALLOCATION_UNIT,
-            SectorsPerAllocationUnit: 1,
-            VolumeCreationTime: 0,
-            VolumeSerialNumber: 0,
-            FileInfoTimeout: 1000,
-            ..Default::default()
-        };
-        volume_params.set_CaseSensitiveSearch(0);
-        volume_params.set_CasePreservedNames(1);
-        volume_params.set_UnicodeOnDisk(1);
-        volume_params.set_PersistentAcls(1);
-        volume_params.set_PostCleanupWhenModifiedOnly(1);
-        // volume_params.set_PassQueryDirectoryPattern(1);
-        volume_params.set_FlushAndPurgeOnCleanup(1);
-        volume_params.set_UmFileContextIsUserContext2(1);
-
-        let prefix = HSTRING::from(volume_prefix);
-        let fs_name = w!("snowflake-projfs");
-
-        volume_params.Prefix[..std::cmp::min(prefix.len(), 192)]
-            .copy_from_slice(&prefix.as_wide()[..std::cmp::min(prefix.len(), 192)]);
-
-        volume_params.FileSystemName[..std::cmp::min(fs_name.len(), 192)]
-            .copy_from_slice(&fs_name.as_wide()[..std::cmp::min(fs_name.len(), 192)]);
-
-        let context = ProjFsContext {
-            start_time: OffsetDateTime::now_utc(),
-            projections: Projection::from(projections.as_slice()),
-        };
-
-        unsafe {
-            Ok(SnowflakeProjFs {
-                fs: FileSystemHost::new(volume_params, context)?,
-            })
-        }
     }
 }
