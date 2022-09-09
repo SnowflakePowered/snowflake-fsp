@@ -1,10 +1,10 @@
-use windows::Win32::Foundation::MAX_PATH;
-use windows::core::HSTRING;
+use crate::fsp::filesystem::ProjFsContext;
 use snowflake_projfs_common::projections::{Projection, ProjectionEntry};
 use time::OffsetDateTime;
+use windows::core::HSTRING;
 use windows::w;
+use windows::Win32::Foundation::MAX_PATH;
 use winfsp::filesystem::{FileSystemHost, FSP_FSCTL_VOLUME_PARAMS};
-use crate::fsp::filesystem::ProjFsContext;
 
 pub const ALLOCATION_UNIT: u16 = 4096;
 pub const VOLUME_LABEL: &HSTRING = w!("Snowflake");
@@ -45,8 +45,9 @@ impl ProjFsHost {
         volume_params.Prefix[..std::cmp::min(prefix.len(), 192)]
             .copy_from_slice(&prefix.as_wide()[..std::cmp::min(prefix.len(), 192)]);
 
-        volume_params.FileSystemName[..std::cmp::min(FILESYSTEM_NAME.len(), 192)]
-            .copy_from_slice(&FILESYSTEM_NAME.as_wide()[..std::cmp::min(FILESYSTEM_NAME.len(), 192)]);
+        volume_params.FileSystemName[..std::cmp::min(FILESYSTEM_NAME.len(), 192)].copy_from_slice(
+            &FILESYSTEM_NAME.as_wide()[..std::cmp::min(FILESYSTEM_NAME.len(), 192)],
+        );
 
         let context = ProjFsContext::new(Projection::from(projections.as_slice()));
 

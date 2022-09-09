@@ -20,8 +20,7 @@ f(/dir2/d1|C:\\test.txt|r);
 
     let parsed = parse_projection(projection.as_bytes()).unwrap();
     eprintln!("{:?}", parsed);
-    let mut projfs =
-        ProjFsHost::create(parsed, &args.volume_prefix.unwrap_or(String::from("")))?;
+    let mut projfs = ProjFsHost::create(parsed, &args.volume_prefix.unwrap_or(String::from("")))?;
 
     projfs.fs.mount(args.mountpoint.as_os_str())?;
     projfs.fs.start()?;

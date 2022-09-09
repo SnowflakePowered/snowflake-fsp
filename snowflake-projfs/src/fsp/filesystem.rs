@@ -14,36 +14,36 @@ use std::path::Path;
 use time::OffsetDateTime;
 use widestring::{u16cstr, U16String};
 
+use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
 use windows::core::{HSTRING, PCWSTR, PSTR};
 use windows::w;
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE, GetLastError,
+    GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
     HANDLE, MAX_PATH,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetKernelObjectSecurity, GROUP_SECURITY_INFORMATION,
+    GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
-    FILE_ATTRIBUTE_READONLY, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle,
-    GetFinalPathNameByHandleW, OPEN_EXISTING, READ_CONTROL, ReadFile, WIN32_FIND_DATAW,
+    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle,
+    GetFileSizeEx, GetFinalPathNameByHandleW, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION,
+    FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 use winfsp::error::FspError;
 use winfsp::filesystem::{
-    DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, FSP_FSCTL_FILE_INFO,
-    FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS, IoResult,
+    DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, IoResult,
+    FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
 use winfsp::util::SafeDropHandle;
-use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
 
 use crate::fsp::util::{quadpart_to_u64, systemtime_to_filetime, win32_try};
 
@@ -71,6 +71,27 @@ pub struct ProjFsFileContext {
     dir_buffer: DirBuffer,
 }
 
+macro_rules! require_handle {
+    ($context:expr, $handle:ident => $body:block) => {
+        match $context {
+            ProjectedHandle::Real {
+                handle: $handle, ..
+            }
+            | ProjectedHandle::Projected($handle) => $body,
+            ProjectedHandle::Directory(_) => return Err(ERROR_DIRECTORY.into()),
+        }
+    };
+    ($context:expr, $handle:ident => $body:block else $el:block) => {
+        match $context {
+            ProjectedHandle::Real {
+                handle: $handle, ..
+            }
+            | ProjectedHandle::Projected($handle) => $body,
+            ProjectedHandle::Directory(_) => $el,
+        }
+    };
+}
+
 impl ProjFsContext {
     pub(crate) fn new(projections: Projection) -> Self {
         ProjFsContext {
@@ -78,7 +99,7 @@ impl ProjFsContext {
             projections,
         }
     }
-    
+
     fn get_virtdir_file_info(&self, file_info: &mut FSP_FSCTL_FILE_INFO) {
         file_info.FileAttributes = (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY).0;
 
@@ -304,22 +325,8 @@ impl FileSystemContext for ProjFsContext {
 
         if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
             return match (entry, remainder) {
-                (
-                    ProjectionEntry::File {
-                        source,
-                        access,
-                        ..
-                    },
-                    _,
-                )
-                | (
-                    ProjectionEntry::Portal {
-                        source,
-                        access,
-                        ..
-                    },
-                    None,
-                ) => {
+                (ProjectionEntry::File { source, access, .. }, _)
+                | (ProjectionEntry::Portal { source, access, .. }, None) => {
                     let file_path = HSTRING::from(source.as_os_str());
                     let handle = Self::open_handle_internal(
                         file_path,
@@ -374,7 +381,7 @@ impl FileSystemContext for ProjFsContext {
                     self.get_file_info_internal(&context, file_info)?;
                     Ok(context)
                 }
-            }
+            };
         }
 
         Err(ERROR_FILE_OFFLINE.into())
@@ -423,26 +430,23 @@ impl FileSystemContext for ProjFsContext {
         descriptor_len: Option<u64>,
     ) -> winfsp::Result<u64> {
         let mut descriptor_size_needed = 0;
-        match &context.handle {
-            ProjectedHandle::Real { handle, .. } | ProjectedHandle::Projected(handle) => {
-                win32_try!(unsafe GetKernelObjectSecurity(
-                    *handle.deref(),
-                    (OWNER_SECURITY_INFORMATION
-                        | GROUP_SECURITY_INFORMATION
-                        | DACL_SECURITY_INFORMATION)
-                        .0,
-                    security_descriptor,
-                    descriptor_len.unwrap_or(0) as u32,
-                    &mut descriptor_size_needed,
-                ));
-            }
-            ProjectedHandle::Directory(_) => {
-                descriptor_size_needed = winfsp::util::get_process_security(
-                    security_descriptor,
-                    descriptor_len.map(|d| d as u32),
-                )?
-            }
-        }
+        require_handle!(&context.handle, handle => {
+            win32_try!(unsafe GetKernelObjectSecurity(
+                *handle.deref(),
+                (OWNER_SECURITY_INFORMATION
+                    | GROUP_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION)
+                .0,
+                security_descriptor,
+                descriptor_len.unwrap_or(0) as u32,
+                &mut descriptor_size_needed,
+            ));
+        } else {
+            descriptor_size_needed = winfsp::util::get_process_security(
+                security_descriptor,
+                descriptor_len.map(|d| d as u32),
+            )?
+        });
 
         Ok(descriptor_size_needed as u64)
     }
@@ -465,34 +469,83 @@ impl FileSystemContext for ProjFsContext {
         buffer: &mut [u8],
         offset: u64,
     ) -> winfsp::Result<IoResult> {
-        let mut overlapped = OVERLAPPED {
-            Anonymous: OVERLAPPED_0 {
-                Anonymous: OVERLAPPED_0_0 {
-                    Offset: offset as u32,
-                    OffsetHigh: (offset >> 32) as u32,
-                },
-            },
-            ..Default::default()
-        };
-
         let mut bytes_read = 0;
+        require_handle!(&context.handle, handle => {
+            let mut overlapped = OVERLAPPED {
+                Anonymous: OVERLAPPED_0 {
+                    Anonymous: OVERLAPPED_0_0 {
+                        Offset: offset as u32,
+                        OffsetHigh: (offset >> 32) as u32,
+                    },
+                },
+                ..Default::default()
+            };
 
-        match &context.handle {
-            ProjectedHandle::Real { handle, .. } | ProjectedHandle::Projected(handle) => {
-                win32_try!(unsafe ReadFile(
-                    *handle.deref(),
-                    buffer.as_mut_ptr() as *mut _,
-                    buffer.len() as u32,
-                    &mut bytes_read,
-                    &mut overlapped,
-                ));
-            }
-            ProjectedHandle::Directory(_) => return Err(ERROR_DIRECTORY.into()),
-        }
+            win32_try!(unsafe ReadFile(
+                *handle.deref(),
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as u32,
+                &mut bytes_read,
+                &mut overlapped,
+            ));
+        });
 
         Ok(IoResult {
             bytes_transferred: bytes_read,
             io_pending: false,
+        })
+    }
+
+    fn write(
+        &self,
+        context: &Self::FileContext,
+        mut buffer: &[u8],
+        offset: u64,
+        _write_to_eof: bool,
+        constrained_io: bool,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> winfsp::Result<IoResult> {
+        require_handle!(&context.handle, handle => {
+            if constrained_io {
+                let mut fsize = 0;
+                win32_try!(unsafe GetFileSizeEx(*handle.deref(), &mut fsize));
+
+                if offset >= fsize as u64 {
+                    return Ok(IoResult {
+                        bytes_transferred: 0,
+                        io_pending: false,
+                    });
+                }
+
+                if offset + buffer.len() as u64 > fsize as u64 {
+                    buffer = &buffer[0..(fsize as u64 - offset) as usize]
+                }
+            }
+
+            let mut overlapped = OVERLAPPED {
+                Anonymous: OVERLAPPED_0 {
+                    Anonymous: OVERLAPPED_0_0 {
+                        Offset: offset as u32,
+                        OffsetHigh: (offset >> 32) as u32,
+                    },
+                },
+                ..Default::default()
+            };
+
+            let mut bytes_transferred = 0;
+            win32_try!(unsafe WriteFile(
+                *handle.deref(),
+                buffer.as_ptr().cast(),
+                buffer.len() as u32,
+                &mut bytes_transferred,
+                &mut overlapped,
+            ));
+
+            self.get_file_info_internal(context, file_info)?;
+            Ok(IoResult {
+                bytes_transferred,
+                io_pending: false,
+            })
         })
     }
 
