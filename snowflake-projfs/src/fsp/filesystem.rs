@@ -19,20 +19,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1,
 };
-use windows::Win32::Security::{
-    GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers,
-    GetFileInformationByHandle, GetFileSizeEx, GetFinalPathNameByHandleW, ReadFile, WriteFile,
-    BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-    FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
-};
-use windows::Win32::System::WindowsProgramming::FILE_DELETE_ON_CLOSE;
+use windows::Win32::Security::{GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows::Win32::Storage::FileSystem::{CreateFileW, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers, GetFileInformationByHandle, GetFileSizeEx, GetFinalPathNameByHandleW, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW, FILE_FLAG_POSIX_SEMANTICS, FILE_ATTRIBUTE_NORMAL, CREATE_NEW};
+use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
 use snowflake_projfs_common::path::OwnedProjectedPath;
@@ -57,7 +46,7 @@ enum ProjectedHandle {
     /// A real file opened under a portal.
     Real {
         handle: SafeDropHandle,
-        parent: OwnedProjectedPath,
+        portal: OwnedProjectedPath,
     },
     /// A projected file or directory that points to a real filesystem entry.
     Projected(SafeDropHandle),
@@ -383,7 +372,7 @@ impl FileSystemContext for ProjFsContext {
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Real {
                             handle: SafeDropHandle::from(handle),
-                            parent: name.clone(),
+                            portal: name.clone(),
                         },
                         dir_buffer: Default::default(),
                     };
@@ -402,14 +391,14 @@ impl FileSystemContext for ProjFsContext {
     fn create<P: AsRef<OsStr>>(
         &self,
         file_name: P,
-        _create_options: u32,
-        _granted_access: FILE_ACCESS_FLAGS,
-        _file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
-        _security_descriptor: PSECURITY_DESCRIPTOR,
-        _allocation_size: u64,
-        _extra_buffer: Option<&[u8]>,
-        _extra_buffer_is_reparse_point: bool,
-        _file_info: &mut FSP_FSCTL_FILE_INFO,
+        create_options: u32,
+        granted_access: FILE_ACCESS_FLAGS,
+        mut file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
+        security_descriptor: PSECURITY_DESCRIPTOR,
+        allocation_size: u64,
+        extra_buffer: Option<&[u8]>,
+        extra_buffer_is_reparse_point: bool,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
         let new_path = Path::new(file_name.as_ref());
         let parent = new_path.parent().ok_or(STATUS_OBJECT_NAME_INVALID)?;
@@ -419,11 +408,66 @@ impl FileSystemContext for ProjFsContext {
         eprintln!("cr: {:?} under {:?}", new_path, parent);
         if let Some((entry, remainder)) = self.projections.search_entry(parent) {
             match entry {
-                ProjectionEntry::Portal { source, .. } => {
+                ProjectionEntry::Portal { source, name, .. } => {
                     // true parent
                     let parent = remainder
                         .map_or_else(|| source.clone(), |remainder| source.join(remainder));
-                    let target = parent.join(new_filename);
+                    let target_path = parent.join(new_filename);
+
+                    if target_path.as_os_str().len() > FULLPATH_SIZE {
+                        return Err(STATUS_OBJECT_NAME_INVALID.into());
+                    }
+
+                    let security_attributes = SECURITY_ATTRIBUTES {
+                        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                        lpSecurityDescriptor: security_descriptor.0,
+                        bInheritHandle: false.into(),
+                    };
+
+                    let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
+                    if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
+                        create_flags |= FILE_FLAG_DELETE_ON_CLOSE;
+                    }
+
+                    if (create_options & FILE_DIRECTORY_FILE) != 0 {
+                        create_flags |= FILE_FLAG_POSIX_SEMANTICS;
+                        file_attributes |= FILE_ATTRIBUTE_DIRECTORY
+                    } else {
+                        file_attributes &= !FILE_ATTRIBUTE_DIRECTORY
+                    }
+
+                    if file_attributes == FILE_FLAGS_AND_ATTRIBUTES(0) {
+                        file_attributes = FILE_ATTRIBUTE_NORMAL
+                    }
+
+                    let target_path = HSTRING::from(target_path.as_os_str());
+
+                    let handle = unsafe {
+                        let handle = CreateFileW(
+                            PCWSTR(target_path.as_ptr()),
+                            granted_access,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            &security_attributes,
+                            CREATE_NEW,
+                            create_flags | file_attributes,
+                            None,
+                        )?;
+                        if handle.is_invalid() {
+                            return Err(FspError::from(GetLastError()));
+                        }
+                        handle
+                    };
+
+                    let context = Self::FileContext {
+                        handle: ProjectedHandle::Real {
+                            handle: SafeDropHandle::from(handle),
+                            portal: name.clone()
+                        },
+                        dir_buffer: Default::default()
+                    };
+
+                    self.get_file_info_internal(&context, file_info)?;
+                    return Ok(context)
                 }
                 _ => return Err(ERROR_ACCESS_DENIED.into()),
             }
