@@ -1,6 +1,8 @@
 use crate::path::{OwnedProjectedPath, ProjectedPath};
 use qp_trie::Trie;
+use std::borrow::Cow;
 use std::ffi::OsStr;
+use std::fs::{DirEntry, ReadDir};
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 
@@ -33,6 +35,61 @@ pub struct Projection {
     entries: Trie<OwnedProjectedPath, ProjectionEntry>,
 }
 
+type ProjectionChildren<'a, P: AsRef<ProjectedPath> + 'a> =
+    impl Iterator<Item = &'a ProjectionEntry>;
+
+enum DirSearch<'a, P: AsRef<ProjectedPath> + 'a> {
+    Entry(ProjectionChildren<'a, P>),
+    Real(ReadDir),
+}
+
+impl<'a, P: AsRef<ProjectedPath> + 'a> DirSearch<'a, P> {
+    pub fn find_case_insensitive<F: AsRef<OsStr>>(
+        &mut self,
+        file_name: F,
+        projection: &'a Projection,
+    ) -> Option<(Cow<OsStr>, Option<DirSearch<'a, &'a OwnedProjectedPath>>)> {
+        match self {
+            DirSearch::Entry(iterator) => iterator
+                .find(|f| {
+                    if let Some(f) = f.file_name() {
+                        // todo: do proper case folding
+                        return f.eq_ignore_ascii_case(file_name.as_ref());
+                    }
+                    false
+                })
+                .and_then(|f| {
+                    let name = f.file_name().map(Cow::Borrowed);
+                    let next = match f {
+                        ProjectionEntry::File { .. } => None,
+                        ProjectionEntry::Directory { name, .. } => {
+                            projection.get_children(name).map(DirSearch::Entry)
+                        }
+                        ProjectionEntry::Portal { source, .. } => {
+                            source.read_dir().ok().map(DirSearch::Real)
+                        }
+                    };
+                    name.map(|n| (n, next))
+                }),
+            DirSearch::Real(readdir) => readdir
+                .find(|f| {
+                    if let Ok(f) = f {
+                        return f.file_name().eq_ignore_ascii_case(file_name.as_ref());
+                    }
+                    false
+                })
+                .and_then(|f| {
+                    f.ok().map(|f| {
+                        (
+                            Cow::Owned(f.file_name()),
+                            f.path().read_dir().ok().map(DirSearch::Real),
+                        )
+                    })
+                }),
+        }
+    }
+}
+
 impl Projection {
     pub fn get_parent<'a, P: AsRef<ProjectedPath> + 'a>(
         &'a self,
@@ -45,7 +102,7 @@ impl Projection {
     pub fn get_children<'a, P: AsRef<ProjectedPath> + 'a>(
         &'a self,
         canonical_path: P,
-    ) -> Option<impl Iterator<Item = &ProjectionEntry>> {
+    ) -> Option<ProjectionChildren<'a, P>> {
         let subtrie = self.entries.subtrie(canonical_path.as_ref());
         if subtrie.is_empty() {
             return None;
@@ -75,36 +132,18 @@ impl Projection {
         self.entries.get(canonical_path.as_ref())
     }
 
-    /// Searches for an entry given a path from the filesystem driver.
-    ///
-    /// If the canonicalized input exists in the Projection, returns such longest match.
-    ///
-    /// Otherwise, the longest common path prefix is searched for a Portal. If a Portal is found,
-    /// returns the Portal entry, and the path to the target relative to the Portal source.
-    ///
-    /// If a shorter match exists but is not a Portal, returns None. Only Portals are matched eagerly.
-    /// If no match is found, returns None.
-    ///
-    /// If a portal is found, the returned segment is a non-projected, OS-dependent PathBuf. This means
-    /// that the path separator is OS-dependent, and can be directly pushed into a PathBuf of the
-    /// real path to the portal.
-    pub fn search_entry<P: AsRef<Path>>(
+    fn search_entry_internal<P: AsRef<ProjectedPath>>(
         &self,
-        path: P,
+        full_path: P,
     ) -> Option<(&ProjectionEntry, Option<PathBuf>)> {
-        if path.as_ref().components().count() == 0 {
-            return None;
-        }
-
-        let full_path = OwnedProjectedPath::new_canonical(path.as_ref());
-
-        if let Some(entry) = self.entries.get(&full_path) {
+        let full_path = full_path.as_ref();
+        if let Some(entry) = self.entries.get(full_path) {
             return Some((entry, None));
         }
 
         // SAFETY: segments can not be empty.
         // Never use returned prefixes directly because they are in WTF8 on windows.
-        let prefix = self.entries.longest_common_prefix(&full_path);
+        let prefix = self.entries.longest_common_prefix(full_path);
         let entry = self.entries.get(prefix);
         if let Some(entry) = entry {
             if !entry.is_portal() {
@@ -145,6 +184,109 @@ impl Projection {
         }
 
         None
+    }
+
+    /// Searches for an entry given a path from the filesystem driver in a case-insensitive manner.
+    ///
+    /// If the canonicalized input exists in the Projection, returns such longest match.
+    ///
+    /// Otherwise, the longest common path prefix is searched for a Portal. If a Portal is found,
+    /// returns the Portal entry, and the path to the target relative to the Portal source.
+    ///
+    /// If a shorter match exists but is not a Portal, returns None. Only Portals are matched eagerly.
+    /// If no match is found, returns None.
+    ///
+    /// If a portal is found, the returned segment is a non-projected, OS-dependent PathBuf. This means
+    /// that the path separator is OS-dependent, and can be directly pushed into a PathBuf of the
+    /// real path to the portal.
+    pub fn search_entry_case_insensitive<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Option<(&ProjectionEntry, Option<PathBuf>)> {
+        if path.as_ref().components().count() == 0 {
+            return None;
+        }
+
+        // case-sensitive optimization: if the path already exists in the projection,
+        // then we do not need to expensively resolve the case.
+        if let Some(result) = self.search_entry(path.as_ref()) {
+            return Some(result);
+        }
+
+        let full_path = OwnedProjectedPath::new_canonical(path.as_ref());
+        let full_path = self.resolve_case_insensitive(&full_path);
+        self.search_entry_internal(&full_path)
+    }
+
+    /// Searches for an entry given a path from the filesystem driver.
+    ///
+    /// If the canonicalized input exists in the Projection, returns such longest match.
+    ///
+    /// Otherwise, the longest common path prefix is searched for a Portal. If a Portal is found,
+    /// returns the Portal entry, and the path to the target relative to the Portal source.
+    ///
+    /// If a shorter match exists but is not a Portal, returns None. Only Portals are matched eagerly.
+    /// If no match is found, returns None.
+    ///
+    /// If a portal is found, the returned segment is a non-projected, OS-dependent PathBuf. This means
+    /// that the path separator is OS-dependent, and can be directly pushed into a PathBuf of the
+    /// real path to the portal.
+    pub fn search_entry<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Option<(&ProjectionEntry, Option<PathBuf>)> {
+        if path.as_ref().components().count() == 0 {
+            return None;
+        }
+
+        let full_path = OwnedProjectedPath::new_canonical(path.as_ref());
+        self.search_entry_internal(&full_path)
+    }
+
+    /// Resolve the **absolute** projected path against the projection as a case insensitive path.
+    // panics if the path is not absolute.
+    pub fn resolve_case_insensitive<P: AsRef<ProjectedPath>>(&self, path: P) -> OwnedProjectedPath {
+        let path = path.as_ref();
+        let mut buf = PathBuf::from("/");
+
+        // need the iterator returned from get_children to be &OwnedProjectedPath
+        // to get tait unification working
+        let root = OwnedProjectedPath::root();
+        let root_children = self.get_children(&root);
+        // if the projection is completely empty, we can not resolve anything.
+        if root_children.is_none() {
+            return OwnedProjectedPath::from(path);
+        }
+        let mut search = DirSearch::Entry(root_children.unwrap());
+        let mut components = path.as_path().components();
+
+        for component in components.by_ref() {
+            match component {
+                Component::Normal(component) => {
+                    if let Some((result, next)) = search.find_case_insensitive(component, self) {
+                        buf.push(result);
+                        if let Some(next) = next {
+                            search = next;
+                        } else {
+                            // no next directory, so we bail.
+                            break;
+                        }
+                    } else {
+                        // Can no longer resolve against the projection so just bail.
+                        buf.push(component);
+                        break;
+                    }
+                }
+                Component::RootDir => {}
+                Component::Prefix(_) => {}
+                _ => panic!("path must be absolute"),
+            }
+        }
+
+        for component in components {
+            buf.push(component)
+        }
+        OwnedProjectedPath::new_canonical(buf)
     }
 }
 

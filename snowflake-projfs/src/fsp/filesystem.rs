@@ -6,21 +6,33 @@ use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
-use widestring::{u16cstr, U16String};
+use widestring::{u16cstr, U16Str, U16String};
 use windows::core::{HSTRING, PCWSTR, PSTR};
 use windows::w;
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
-    HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
+    ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1,
 };
-use windows::Win32::Security::{GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::{CreateFileW, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers, GetFileInformationByHandle, GetFileSizeEx, GetFinalPathNameByHandleW, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW, FILE_FLAG_POSIX_SEMANTICS, FILE_ATTRIBUTE_NORMAL, CREATE_NEW};
+use windows::Win32::Security::{
+    GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers,
+    GetFileInformationByHandle, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile,
+    WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+    FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
+};
 use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
@@ -35,30 +47,6 @@ use winfsp::util::SafeDropHandle;
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
 use crate::fsp::util::{quadpart_to_u64, systemtime_to_filetime, win32_try};
-
-#[repr(C)]
-pub struct ProjFsContext {
-    start_time: OffsetDateTime,
-    projections: Projection,
-}
-
-enum ProjectedHandle {
-    /// A real file opened under a portal.
-    Real {
-        handle: SafeDropHandle,
-        portal: OwnedProjectedPath,
-    },
-    /// A projected file or directory that points to a real filesystem entry.
-    Projected(SafeDropHandle),
-    /// A directory with a canonical path in the projection tree.
-    Directory(OwnedProjectedPath),
-}
-
-#[repr(C)]
-pub struct ProjFsFileContext {
-    handle: ProjectedHandle,
-    dir_buffer: DirBuffer,
-}
 
 /// Do an operation that requires a real file handle with optional else block for virtual directories.
 /// If no optional block is provided, returns ERROR_DIRECTORY.
@@ -90,6 +78,53 @@ macro_rules! require_handle {
             ProjectedHandle::Directory($path) => $el,
         }
     };
+}
+
+#[repr(C)]
+pub struct ProjFsContext {
+    start_time: OffsetDateTime,
+    projections: Projection,
+}
+
+enum ProjectedHandle {
+    /// A real file opened under a portal.
+    Real {
+        handle: SafeDropHandle,
+        portal: OwnedProjectedPath,
+    },
+    /// A projected file or directory that points to a real filesystem entry.
+    Projected(SafeDropHandle),
+    /// A directory with a canonical path in the projection tree.
+    Directory(OwnedProjectedPath),
+}
+
+#[repr(C)]
+pub struct ProjFsFileContext {
+    handle: ProjectedHandle,
+    dir_buffer: DirBuffer,
+}
+
+impl ProjectedHandle {
+    /// Get the real path of the handle if available.
+    pub fn get_real_path(&self) -> Option<PathBuf> {
+        require_handle!(self, handle => {
+            let mut full_path = [0; FULLPATH_SIZE];
+            let length = unsafe {
+                GetFinalPathNameByHandleW(
+                    *handle.deref(),
+                    &mut full_path[0..FULLPATH_SIZE - 1],
+                    FILE_NAME::default(),
+                )
+            };
+            if length == 0 {
+                return None;
+            }
+            let full_path = U16Str::from_slice(&full_path[..length as usize]);
+            Some(PathBuf::from(full_path.to_os_string()))
+        } else {
+            None
+        })
+    }
 }
 
 impl ProjFsContext {
@@ -261,7 +296,10 @@ impl FileSystemContext for ProjFsContext {
             });
         }
 
-        if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
+        if let Some((entry, remainder)) = self
+            .projections
+            .search_entry_case_insensitive(file_name.as_ref())
+        {
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, .. }, _)
                 | (ProjectionEntry::Portal { source, .. }, None) => {
@@ -322,7 +360,10 @@ impl FileSystemContext for ProjFsContext {
             return Ok(context);
         }
 
-        if let Some((entry, remainder)) = self.projections.search_entry(file_name.as_ref()) {
+        if let Some((entry, remainder)) = self
+            .projections
+            .search_entry_case_insensitive(file_name.as_ref())
+        {
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, access, .. }, _)
                 | (ProjectionEntry::Portal { source, access, .. }, None) => {
@@ -342,7 +383,6 @@ impl FileSystemContext for ProjFsContext {
                     Ok(context)
                 }
                 (ProjectionEntry::Directory { name, .. }, _) => {
-                    eprintln!("vd: {:?}", name);
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Directory(name.clone()),
                         dir_buffer: Default::default(),
@@ -395,19 +435,19 @@ impl FileSystemContext for ProjFsContext {
         granted_access: FILE_ACCESS_FLAGS,
         mut file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
         security_descriptor: PSECURITY_DESCRIPTOR,
-        allocation_size: u64,
-        extra_buffer: Option<&[u8]>,
-        extra_buffer_is_reparse_point: bool,
+        _allocation_size: u64,
+        _extra_buffer: Option<&[u8]>,
+        _extra_buffer_is_reparse_point: bool,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
         let new_path = Path::new(file_name.as_ref());
-        let parent = new_path.parent().ok_or(STATUS_OBJECT_NAME_INVALID)?;
 
+        let parent = new_path.parent().ok_or(STATUS_OBJECT_NAME_INVALID)?;
         let new_filename = new_path.file_name().ok_or(STATUS_OBJECT_NAME_INVALID)?;
 
         eprintln!("cr: {:?} under {:?}", new_path, parent);
-        if let Some((entry, remainder)) = self.projections.search_entry(parent) {
-            match entry {
+        if let Some((entry, remainder)) = self.projections.search_entry_case_insensitive(parent) {
+            return match entry {
                 ProjectionEntry::Portal { source, name, .. } => {
                     // true parent
                     let parent = remainder
@@ -461,18 +501,75 @@ impl FileSystemContext for ProjFsContext {
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Real {
                             handle: SafeDropHandle::from(handle),
-                            portal: name.clone()
+                            portal: name.clone(),
                         },
-                        dir_buffer: Default::default()
+                        dir_buffer: Default::default(),
                     };
 
                     self.get_file_info_internal(&context, file_info)?;
-                    return Ok(context)
+                    Ok(context)
                 }
-                _ => return Err(ERROR_ACCESS_DENIED.into()),
-            }
+                _ => Err(ERROR_ACCESS_DENIED.into()),
+            };
         } else {
             eprintln!("could not find parent {:?}", parent);
+        }
+        Err(ERROR_ACCESS_DENIED.into())
+    }
+
+    fn rename<P: AsRef<OsStr>>(
+        &self,
+        context: &Self::FileContext,
+        _file_name: P,
+        new_file_name: P,
+        replace_if_exists: bool,
+    ) -> winfsp::Result<()> {
+        if let ProjectedHandle::Real { portal, .. } = &context.handle {
+            // WinFSP treats filenames as case-insensitive and gives us an uppercase name.
+            // We need to resolve it against the case-sensitive projections.
+            let target_portal = self
+                .projections
+                .search_entry_case_insensitive(Path::new(new_file_name.as_ref()));
+            let source_portal = self.projections.get_entry(portal);
+            eprintln!("rn: tp {:?}", target_portal);
+            eprintln!("rn: sp {:?}", source_portal);
+
+            if let (
+                Some((target_portal @ ProjectionEntry::Portal { source, .. }, target_remainder)),
+                Some(source_portal),
+            ) = (target_portal, source_portal)
+            {
+                if target_portal != source_portal {
+                    eprintln!("target portal is not real portal");
+                    return Err(ERROR_ACCESS_DENIED.into());
+                }
+
+                if target_remainder.is_none() {
+                    return Err(ERROR_INVALID_NAME.into());
+                }
+
+                if let Some(source_path) = &context.handle.get_real_path() {
+                    let target_path = source.join(target_remainder.unwrap());
+
+                    eprintln!("mv: source {:?}", source_path);
+                    eprintln!("mv: target {:?}", target_path);
+
+                    let source_path = HSTRING::from(source_path.as_os_str());
+                    let target_path = HSTRING::from(target_path.as_os_str());
+
+                    win32_try!(unsafe MoveFileExW(
+                        PCWSTR::from_raw(source_path.as_ptr()),
+                        PCWSTR::from_raw(target_path.as_ptr()),
+                        if replace_if_exists {
+                            MOVEFILE_REPLACE_EXISTING
+                        } else {
+                            MOVE_FILE_FLAGS::default()
+                        }
+                    ));
+
+                    return Ok(());
+                }
+            }
         }
         Err(ERROR_ACCESS_DENIED.into())
     }
