@@ -1,6 +1,5 @@
 use crate::fsp::filesystem::ProjFsContext;
 use snowflake_projfs_common::projections::{Projection, ProjectionEntry};
-use time::OffsetDateTime;
 use windows::core::HSTRING;
 use windows::w;
 use windows::Win32::Foundation::MAX_PATH;

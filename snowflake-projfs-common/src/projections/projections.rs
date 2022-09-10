@@ -2,7 +2,7 @@ use crate::path::{OwnedProjectedPath, ProjectedPath};
 use qp_trie::Trie;
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::fs::{DirEntry, ReadDir};
+use std::fs::ReadDir;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 

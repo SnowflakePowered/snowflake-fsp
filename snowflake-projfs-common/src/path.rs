@@ -1,6 +1,5 @@
-use crate::projections::Projection;
 use qp_trie::Break;
-use std::borrow::{Borrow, BorrowMut};
+use std::borrow::Borrow;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};

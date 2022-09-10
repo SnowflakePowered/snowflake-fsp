@@ -1,40 +1,36 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::fs::{DirEntry, OpenOptions};
-use std::io::ErrorKind;
-use std::mem::MaybeUninit;
+use std::fs::OpenOptions;
+
 use std::ops::{BitXor, Deref};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
-use widestring::{u16cstr, U16Str, U16String};
-use windows::core::{HSTRING, PCWSTR, PSTR};
-use windows::w;
+use widestring::{U16Str, U16String};
+use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{
     GetLastError, BOOLEAN, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
     ERROR_FILE_OFFLINE, ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
 };
-use windows::Win32::Security::Authorization::{
-    ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1,
-};
+
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileEndOfFileInfo,
-    FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile,
-    SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
-    FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
-    FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING,
-    MOVE_FILE_FLAGS, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
+    FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
+    GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle, WriteFile,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE,
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
+    FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING,
+    READ_CONTROL,
 };
 use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
@@ -42,11 +38,11 @@ use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 use snowflake_projfs_common::path::OwnedProjectedPath;
 use snowflake_projfs_common::projections::{FileAccess, Projection, ProjectionEntry};
 use winfsp::error::FspError;
-use winfsp::filesystem::{
-    DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, IoResult,
-    FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
-};
 use winfsp::filesystem::constants::FspCleanupFlags;
+use winfsp::filesystem::{
+    DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, IoResult, FSP_FSCTL_FILE_INFO,
+    FSP_FSCTL_VOLUME_INFO,
+};
 use winfsp::util::SafeDropHandle;
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
@@ -373,7 +369,7 @@ impl FileSystemContext for ProjFsContext {
                 | (ProjectionEntry::Portal { source, access, .. }, None) => {
                     // Forbid projected entries from being deleted.
                     if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
-                        return Err(ERROR_ACCESS_DENIED.into())
+                        return Err(ERROR_ACCESS_DENIED.into());
                     }
                     let file_path = HSTRING::from(source.as_os_str());
                     let handle = Self::open_handle_internal(
@@ -393,7 +389,7 @@ impl FileSystemContext for ProjFsContext {
                 (ProjectionEntry::Directory { name, .. }, _) => {
                     // Forbid projected entries from being deleted.
                     if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
-                        return Err(ERROR_ACCESS_DENIED.into())
+                        return Err(ERROR_ACCESS_DENIED.into());
                     }
 
                     let context = Self::FileContext {
