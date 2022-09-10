@@ -3,7 +3,7 @@ use std::fs;
 use std::fs::{DirEntry, OpenOptions};
 use std::io::ErrorKind;
 use std::mem::MaybeUninit;
-use std::ops::Deref;
+use std::ops::{BitXor, Deref};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
 use std::path::{Path, PathBuf};
@@ -13,8 +13,8 @@ use widestring::{u16cstr, U16Str, U16String};
 use windows::core::{HSTRING, PCWSTR, PSTR};
 use windows::w;
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
-    ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
+    GetLastError, BOOLEAN, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
+    ERROR_FILE_OFFLINE, ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorA, SDDL_REVISION_1,
@@ -24,14 +24,17 @@ use windows::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers,
-    GetFileInformationByHandle, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile,
-    WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
-    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
-    FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
+    CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileEndOfFileInfo,
+    FindClose, FindFirstFileW, FindNextFileW, FlushFileBuffers, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile,
+    SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
+    FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
+    FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING,
+    MOVE_FILE_FLAGS, OPEN_EXISTING, READ_CONTROL, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
@@ -43,6 +46,7 @@ use winfsp::filesystem::{
     DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, FileSystemHost, IoResult,
     FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
+use winfsp::filesystem::constants::FspCleanupFlags;
 use winfsp::util::SafeDropHandle;
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
@@ -367,6 +371,10 @@ impl FileSystemContext for ProjFsContext {
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, access, .. }, _)
                 | (ProjectionEntry::Portal { source, access, .. }, None) => {
+                    // Forbid projected entries from being deleted.
+                    if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
+                        return Err(ERROR_ACCESS_DENIED.into())
+                    }
                     let file_path = HSTRING::from(source.as_os_str());
                     let handle = Self::open_handle_internal(
                         file_path,
@@ -383,6 +391,11 @@ impl FileSystemContext for ProjFsContext {
                     Ok(context)
                 }
                 (ProjectionEntry::Directory { name, .. }, _) => {
+                    // Forbid projected entries from being deleted.
+                    if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
+                        return Err(ERROR_ACCESS_DENIED.into())
+                    }
+
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Directory(name.clone()),
                         dir_buffer: Default::default(),
@@ -857,5 +870,171 @@ impl FileSystemContext for ProjFsContext {
                 io_pending: false,
             })
         })
+    }
+
+    fn set_basic_info(
+        &self,
+        context: &Self::FileContext,
+        file_attributes: u32,
+        creation_time: u64,
+        last_access_time: u64,
+        last_write_time: u64,
+        last_change_time: u64,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> winfsp::Result<()> {
+        require_handle!(&context.handle, handle => {
+            let basic_info = FILE_BASIC_INFO {
+                FileAttributes: if file_attributes == INVALID_FILE_ATTRIBUTES {
+                    0
+                } else if file_attributes == 0 {
+                    FILE_ATTRIBUTE_NORMAL.0
+                } else {
+                    file_attributes
+                },
+                CreationTime: creation_time as i64,
+                LastAccessTime: last_access_time as i64,
+                LastWriteTime: last_write_time as i64,
+                ChangeTime: last_change_time as i64,
+            };
+            win32_try!(unsafe SetFileInformationByHandle(
+                *handle.deref(),
+                FileBasicInfo,
+                (&basic_info as *const FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            ));
+        });
+
+        self.get_file_info_internal(context, file_info)
+    }
+
+    fn set_file_size(
+        &self,
+        context: &Self::FileContext,
+        new_size: u64,
+        set_allocation_size: bool,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> winfsp::Result<()> {
+        require_handle!(&context.handle, handle => {
+            if set_allocation_size {
+                let allocation_info = FILE_ALLOCATION_INFO {
+                    AllocationSize: new_size as i64,
+                };
+
+                win32_try!(unsafe SetFileInformationByHandle(
+                    *handle.deref(),
+                    FileAllocationInfo,
+                    (&allocation_info as *const FILE_ALLOCATION_INFO).cast(),
+                    std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32
+                ))
+            } else {
+                let eof_info = FILE_END_OF_FILE_INFO {
+                    EndOfFile: new_size as i64,
+                };
+
+                win32_try!(unsafe SetFileInformationByHandle(
+                    *handle.deref(),
+                    FileEndOfFileInfo,
+                    (&eof_info as *const FILE_END_OF_FILE_INFO).cast(),
+                    std::mem::size_of::<FILE_END_OF_FILE_INFO>() as u32
+                ))
+            }
+        });
+
+        self.get_file_info_internal(context, file_info)
+    }
+
+    fn overwrite(
+        &self,
+        context: &Self::FileContext,
+        file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
+        replace_file_attributes: bool,
+        _allocation_size: u64,
+        file_info: &mut FSP_FSCTL_FILE_INFO,
+    ) -> winfsp::Result<()> {
+        // todo: preserve allocation size
+        eprintln!("overwtite");
+        require_handle!(&context.handle, handle => {
+            let mut attribute_tag_info = FILE_ATTRIBUTE_TAG_INFO::default();
+            if replace_file_attributes {
+                let basic_info = FILE_BASIC_INFO {
+                    FileAttributes: if file_attributes == FILE_FLAGS_AND_ATTRIBUTES(0) {
+                        FILE_ATTRIBUTE_NORMAL
+                    } else {
+                        file_attributes
+                    }
+                        .0,
+                    ..Default::default()
+                };
+
+                win32_try!(unsafe SetFileInformationByHandle(
+                    *handle.deref(),
+                    FileBasicInfo,
+                    (&basic_info as *const FILE_BASIC_INFO).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                ));
+            } else if file_attributes != FILE_FLAGS_AND_ATTRIBUTES(0) {
+                let mut basic_info = FILE_BASIC_INFO::default();
+                win32_try!(unsafe GetFileInformationByHandleEx(
+                    *handle.deref(),
+                    FileAllocationInfo,
+                    (&mut attribute_tag_info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                    std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+                ));
+
+                basic_info.FileAttributes = file_attributes.0 | attribute_tag_info.FileAttributes;
+                if basic_info.FileAttributes.bitxor(file_attributes.0) != 0 {
+                    win32_try!(unsafe SetFileInformationByHandle(
+                        *handle.deref(),
+                        FileBasicInfo,
+                        (&basic_info as *const FILE_BASIC_INFO).cast(),
+                        std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                    ));
+                }
+            }
+
+            let alloc_info = FILE_ALLOCATION_INFO::default();
+            win32_try!(unsafe SetFileInformationByHandle(
+                *handle.deref(),
+                FileAllocationInfo,
+                (&alloc_info as *const FILE_ALLOCATION_INFO).cast(),
+                std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
+            ));
+        });
+
+        self.get_file_info_internal(context, file_info)
+    }
+
+    fn set_delete<P: AsRef<OsStr>>(
+        &self,
+        context: &Self::FileContext,
+        _file_name: P,
+        delete_file: bool,
+    ) -> winfsp::Result<()> {
+        // only allow delete of real files.
+        if let ProjectedHandle::Real { handle, .. } = &context.handle {
+            let disposition_info = FILE_DISPOSITION_INFO {
+                DeleteFileA: BOOLEAN(if delete_file { 1 } else { 0 }),
+            };
+
+            win32_try!(unsafe SetFileInformationByHandle(*handle.deref(),
+                FileDispositionInfo, (&disposition_info as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32));
+            Ok(())
+        } else {
+            Err(ERROR_ACCESS_DENIED.into())
+        }
+    }
+
+    fn cleanup<P: AsRef<OsStr>>(
+        &self,
+        context: &mut Self::FileContext,
+        _file_name: Option<P>,
+        flags: u32,
+    ) {
+        if let ProjectedHandle::Real { handle, .. } = &mut context.handle {
+            if flags & FspCleanupFlags::FspCleanupDelete as u32 != 0 {
+                handle.invalidate();
+            }
+        }
     }
 }
