@@ -16,6 +16,7 @@ p(/portal|C:\\test|rw|protected:file:|);
 p(/dead_portal|C:\\nope|rw|protected:file:|);
 f(/dir2/d0|C:\\test\\test.txt|r);
 f(/dir2/d1|C:\\test.txt|r);
+p(/ps3|E:\\Emulators\\RPCS3|rw|:|);
         ";
 
     let parsed = parse_projection(projection.as_bytes()).unwrap();

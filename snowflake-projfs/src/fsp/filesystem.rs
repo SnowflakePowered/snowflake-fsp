@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
 
-use std::ops::{BitXor, Deref};
+use std::ops::{BitXor, Deref, DerefMut};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
 use std::path::{Path, PathBuf};
@@ -20,10 +20,10 @@ use windows::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileEndOfFileInfo,
-    FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
-    GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle, WriteFile,
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
+    CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
+    FileEndOfFileInfo, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle,
+    WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE,
     FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
     FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
@@ -32,10 +32,14 @@ use windows::Win32::Storage::FileSystem::{
     INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING,
     READ_CONTROL,
 };
-use windows::Win32::System::WindowsProgramming::{FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE};
+use windows::Win32::System::WindowsProgramming::{
+    FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_DO_NOT_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO_EX,
+};
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
-use snowflake_projfs_common::path::OwnedProjectedPath;
+use snowflake_projfs_common::path::{OwnedProjectedPath, ProjectedPath};
 use snowflake_projfs_common::projections::{FileAccess, Projection, ProjectionEntry};
 use winfsp::error::FspError;
 use winfsp::filesystem::constants::FspCleanupFlags;
@@ -196,7 +200,10 @@ impl ProjFsContext {
         match &file.handle {
             ProjectedHandle::Real { handle, .. } => {
                 // todo: check against protectlist for r/o
-                Self::get_real_file_info(*handle.deref(), file_info)?
+                Self::get_real_file_info(*handle.deref(), file_info).map_err(|e| {
+                    eprintln!("error: {:?}", e);
+                    e
+                })?
             }
             ProjectedHandle::Projected(handle) => {
                 Self::get_real_file_info(*handle.deref(), file_info)?
@@ -218,12 +225,12 @@ impl ProjFsContext {
 
         let f = opt.open(path)?;
         let metadata = f.metadata()?;
-        let handle = HANDLE(f.into_raw_handle() as isize);
+        let handle = SafeDropHandle::from(HANDLE(f.into_raw_handle() as isize));
 
         let mut len_needed = 0;
         if let Some(descriptor_len) = descriptor_len {
             win32_try!(unsafe GetKernelObjectSecurity(
-                handle,
+                *handle,
                 (OWNER_SECURITY_INFORMATION
                     | GROUP_SECURITY_INFORMATION
                     | DACL_SECURITY_INFORMATION)
@@ -364,11 +371,13 @@ impl FileSystemContext for ProjFsContext {
             .projections
             .search_entry_case_insensitive(file_name.as_ref())
         {
+            eprintln!("rndr: {:?}", remainder);
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, access, .. }, _)
                 | (ProjectionEntry::Portal { source, access, .. }, None) => {
                     // Forbid projected entries from being deleted.
                     if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
+                        eprintln!("fp delete failed");
                         return Err(ERROR_ACCESS_DENIED.into());
                     }
                     let file_path = HSTRING::from(source.as_os_str());
@@ -389,6 +398,7 @@ impl FileSystemContext for ProjFsContext {
                 (ProjectionEntry::Directory { name, .. }, _) => {
                     // Forbid projected entries from being deleted.
                     if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
+                        eprintln!("d delete failed");
                         return Err(ERROR_ACCESS_DENIED.into());
                     }
 
@@ -637,8 +647,8 @@ impl FileSystemContext for ProjFsContext {
     }
 
     fn get_volume_info(&self, out_volume_info: &mut FSP_FSCTL_VOLUME_INFO) -> winfsp::Result<()> {
-        let total_size = 0u64;
-        let free_size = 0u64;
+        let total_size = 1073741824u64;
+        let free_size = 1073741824u64;
 
         out_volume_info.TotalSize = total_size;
         out_volume_info.FreeSize = free_size;
@@ -684,10 +694,11 @@ impl FileSystemContext for ProjFsContext {
     fn read_directory<P: Into<PCWSTR>>(
         &self,
         context: &mut Self::FileContext,
-        _pattern: Option<P>,
+        pattern: Option<P>,
         mut marker: DirMarker,
         buffer: &mut [u8],
     ) -> winfsp::Result<u32> {
+        // todo: fix double slash semantics
         if let Ok(mut buffer) = context.dir_buffer.acquire(marker.is_none(), None) {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
             require_handle!(&context.handle, handle => {
@@ -948,7 +959,7 @@ impl FileSystemContext for ProjFsContext {
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<()> {
         // todo: preserve allocation size
-        eprintln!("overwtite");
+        eprintln!("ow {:?}", context.handle.get_real_path());
         require_handle!(&context.handle, handle => {
             let mut attribute_tag_info = FILE_ATTRIBUTE_TAG_INFO::default();
             if replace_file_attributes {
@@ -968,6 +979,8 @@ impl FileSystemContext for ProjFsContext {
                     (&basic_info as *const FILE_BASIC_INFO).cast(),
                     std::mem::size_of::<FILE_BASIC_INFO>() as u32,
                 ));
+
+                eprintln!("succ set replace")
             } else if file_attributes != FILE_FLAGS_AND_ATTRIBUTES(0) {
                 let mut basic_info = FILE_BASIC_INFO::default();
                 win32_try!(unsafe GetFileInformationByHandleEx(
@@ -986,8 +999,10 @@ impl FileSystemContext for ProjFsContext {
                         std::mem::size_of::<FILE_BASIC_INFO>() as u32,
                     ));
                 }
+                eprintln!("succ set not replace")
             }
 
+            eprintln!("ow: try realloc");
             let alloc_info = FILE_ALLOCATION_INFO::default();
             win32_try!(unsafe SetFileInformationByHandle(
                 *handle.deref(),
@@ -995,6 +1010,7 @@ impl FileSystemContext for ProjFsContext {
                 (&alloc_info as *const FILE_ALLOCATION_INFO).cast(),
                 std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
             ));
+            eprintln!("ow: reallocgood");
         });
 
         self.get_file_info_internal(context, file_info)
@@ -1003,18 +1019,24 @@ impl FileSystemContext for ProjFsContext {
     fn set_delete<P: AsRef<OsStr>>(
         &self,
         context: &Self::FileContext,
-        _file_name: P,
+        file_name: P,
         delete_file: bool,
     ) -> winfsp::Result<()> {
         // only allow delete of real files.
+        eprintln!("del: {:?}", file_name.as_ref());
         if let ProjectedHandle::Real { handle, .. } = &context.handle {
-            let disposition_info = FILE_DISPOSITION_INFO {
-                DeleteFileA: BOOLEAN(if delete_file { 1 } else { 0 }),
+            let disposition_info = FILE_DISPOSITION_INFO_EX {
+                Flags: if delete_file {
+                    // need to remove from namespace immediately, otherwise the handle is still open.
+                    FILE_DISPOSITION_FLAG_DELETE
+                } else {
+                    FILE_DISPOSITION_FLAG_DO_NOT_DELETE
+                },
             };
 
             win32_try!(unsafe SetFileInformationByHandle(*handle.deref(),
-                FileDispositionInfo, (&disposition_info as *const FILE_DISPOSITION_INFO).cast(),
-                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32));
+                FileDispositionInfoEx, (&disposition_info as *const FILE_DISPOSITION_INFO_EX).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32));
             Ok(())
         } else {
             Err(ERROR_ACCESS_DENIED.into())
