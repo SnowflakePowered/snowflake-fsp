@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::OpenOptions;
 
@@ -19,19 +19,7 @@ use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
-    FileEndOfFileInfo, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle,
-    WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE,
-    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
-    FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-    FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING,
-    READ_CONTROL,
-};
+use windows::Win32::Storage::FileSystem::{CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileEndOfFileInfo, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING, READ_CONTROL, FILE_OPEN_IF, FILE_CREATION_DISPOSITION};
 use windows::Win32::System::WindowsProgramming::{
     FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_DO_NOT_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
@@ -100,6 +88,10 @@ enum ProjectedHandle {
     Projected(SafeDropHandle),
     /// A directory with a canonical path in the projection tree.
     Directory(OwnedProjectedPath),
+}
+
+fn join_remainder_windows_semantics(left: impl AsRef<OsStr>, right: impl AsRef<OsStr>) -> OsString {
+    [left.as_ref(), right.as_ref()].join(OsStr::new("\\"))
 }
 
 #[repr(C)]
@@ -340,7 +332,7 @@ impl FileSystemContext for ProjFsContext {
                 (ProjectionEntry::Portal { source, .. }, Some(remainder)) => {
                     // todo: adjust attributes for ro protectlist
                     Self::get_real_file_security_by_name(
-                        source.join(&remainder),
+                        join_remainder_windows_semantics(source, remainder),
                         security_descriptor,
                         descriptor_len,
                     )
@@ -358,6 +350,7 @@ impl FileSystemContext for ProjFsContext {
         granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
+
         if file_name.as_ref() == "\\" {
             let context = Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
@@ -371,7 +364,6 @@ impl FileSystemContext for ProjFsContext {
             .projections
             .search_entry_case_insensitive(file_name.as_ref())
         {
-            eprintln!("rndr: {:?}", remainder);
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, access, .. }, _)
                 | (ProjectionEntry::Portal { source, access, .. }, None) => {
@@ -418,8 +410,9 @@ impl FileSystemContext for ProjFsContext {
                     },
                     Some(remainder),
                 ) => {
-                    let file_path = source.join(remainder);
+                    let file_path = join_remainder_windows_semantics(source, remainder);
                     let file_path = HSTRING::from(file_path.as_os_str());
+                    eprintln!("{}", file_path);
 
                     // todo: check with protectlist.
                     let handle = Self::open_handle_internal(
@@ -470,9 +463,9 @@ impl FileSystemContext for ProjFsContext {
                 ProjectionEntry::Portal { source, name, .. } => {
                     // true parent
                     let parent = remainder
-                        .map_or_else(|| source.clone(), |remainder| source.join(remainder));
-                    let target_path = parent.join(new_filename);
-
+                        .map_or_else(|| source.clone().into_os_string(),
+                                     |remainder| join_remainder_windows_semantics(source, remainder));
+                    let target_path = join_remainder_windows_semantics(parent, new_filename);
                     if target_path.as_os_str().len() > FULLPATH_SIZE {
                         return Err(STATUS_OBJECT_NAME_INVALID.into());
                     }
@@ -568,7 +561,8 @@ impl FileSystemContext for ProjFsContext {
                 }
 
                 if let Some(source_path) = &context.handle.get_real_path() {
-                    let target_path = source.join(target_remainder.unwrap());
+                    let target_path = join_remainder_windows_semantics(source,
+                                                                       target_remainder.unwrap());
 
                     eprintln!("mv: source {:?}", source_path);
                     eprintln!("mv: target {:?}", target_path);
@@ -694,7 +688,7 @@ impl FileSystemContext for ProjFsContext {
     fn read_directory<P: Into<PCWSTR>>(
         &self,
         context: &mut Self::FileContext,
-        pattern: Option<P>,
+        _pattern: Option<P>,
         mut marker: DirMarker,
         buffer: &mut [u8],
     ) -> winfsp::Result<u32> {
@@ -715,6 +709,7 @@ impl FileSystemContext for ProjFsContext {
                     length
                 };
                 let full_path = unsafe { U16String::from_ptr(&full_path as *const u16, length as usize) };
+                eprintln!("rd: {:?}", full_path);
                 let readdir = fs::read_dir(full_path.to_os_string())?;
                 for entry in readdir {
                     dirinfo.reset();

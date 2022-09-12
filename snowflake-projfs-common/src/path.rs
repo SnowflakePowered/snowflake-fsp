@@ -241,7 +241,7 @@ impl Borrow<[u8]> for ProjectedPath {
 
 #[cfg(test)]
 mod tests {
-    use crate::path::canonicalize_path_segments;
+    use crate::path::{canonicalize_path, canonicalize_path_segments};
 
     #[test]
     fn test_normal_path() {
@@ -277,5 +277,11 @@ mod tests {
             path_segments,
             vec!["/test", "/test/path", "/test/path/to", "/test/path/to/file"]
         )
+    }
+
+    #[test]
+    fn test_double_slash() {
+        let path = canonicalize_path(r"\ps3\\dev_hdd1\caches\\NPUA80105_");
+        assert_eq!(path, "/ps3/dev_hdd1/caches/NPUA80105_");
     }
 }
