@@ -114,6 +114,14 @@ fn join_remainder_windows_semantics(left: impl AsRef<OsStr>, right: impl AsRef<O
     [left.as_ref(), right.as_ref()].join(OsStr::new("\\"))
 }
 
+fn join_remainder_nt_semantics(left: impl AsRef<OsStr>, right: impl AsRef<OsStr>) -> OsString {
+    assert!(matches!(
+        Path::new(left.as_ref()).components().next(),
+        Some(Prefix(_))
+    ));
+    [OsStr::new(r"\??\"), left.as_ref(), right.as_ref()].join(OsStr::new("\\"))
+}
+
 fn dos_path_to_nt_path(path: impl AsRef<OsStr>) -> OsString {
     assert!(matches!(
         Path::new(path.as_ref()).components().next(),
@@ -310,6 +318,7 @@ impl ProjFsContext {
             create_options |= FILE_SYNCHRONOUS_IO_NONALERT
         }
 
+        // todo: use ntsemantics
         let file_path = dos_path_to_nt_path(file_path);
         let file_path = HSTRING::from(&file_path);
 
@@ -520,9 +529,9 @@ impl FileSystemContext for ProjFsContext {
                     // true parent
                     let parent = remainder.map_or_else(
                         || source.clone().into_os_string(),
-                        |remainder| join_remainder_windows_semantics(source, remainder),
+                        |remainder| join_remainder_nt_semantics(source, remainder),
                     );
-                    let target_path = join_remainder_windows_semantics(parent, new_filename);
+                    let target_path = join_remainder_nt_semantics(parent, new_filename);
                     if target_path.as_os_str().len() > FULLPATH_SIZE {
                         return Err(STATUS_OBJECT_NAME_INVALID.into());
                     }

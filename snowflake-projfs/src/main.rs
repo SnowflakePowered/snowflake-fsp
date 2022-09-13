@@ -2,6 +2,8 @@
 #![feature(let_chains)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate core;
+
 mod fsp;
 
 use clap::Parser;
