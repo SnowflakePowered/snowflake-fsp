@@ -14,6 +14,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
 };
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows::Win32::System::WindowsProgramming::NtClose;
 
 /// An owned handle that will always be dropped
 /// when it goes out of scope.
@@ -32,7 +33,9 @@ impl SafeDropHandle {
     pub fn invalidate(&mut self) {
         if !self.0.is_invalid() {
             unsafe {
-                CloseHandle(self.0);
+                if let Err(_) = NtClose(self.0) {
+                    CloseHandle(self.0);
+                }
             }
         }
         self.0 = INVALID_HANDLE_VALUE

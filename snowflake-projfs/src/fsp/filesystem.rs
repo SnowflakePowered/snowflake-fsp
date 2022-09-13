@@ -1,29 +1,48 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::OpenOptions;
+use std::mem::MaybeUninit;
 
 use std::ops::{BitXor, Deref, DerefMut};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
+use std::path::Component::Prefix;
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use widestring::{U16Str, U16String};
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     GetLastError, BOOLEAN, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
-    ERROR_FILE_OFFLINE, ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
+    ERROR_FILE_OFFLINE, ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_ACCESS_DENIED,
+    STATUS_INVALID_PARAMETER, STATUS_MEDIA_WRITE_PROTECTED, STATUS_OBJECT_NAME_INVALID,
+    STATUS_PENDING, STATUS_SHARING_VIOLATION, STATUS_SUCCESS, UNICODE_STRING,
 };
 
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
-use windows::Win32::Storage::FileSystem::{CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileEndOfFileInfo, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING, READ_CONTROL, FILE_OPEN_IF, FILE_CREATION_DISPOSITION};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
+    FileEndOfFileInfo, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, NtCreateFile, ReadFile,
+    SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
+    FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_CREATION_DISPOSITION, FILE_DISPOSITION_INFO,
+    FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_NAME, FILE_OPEN_IF, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS,
+    OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
+};
 use windows::Win32::System::WindowsProgramming::{
-    FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
+    RtlInitUnicodeString, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_DO_NOT_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX,
+    FILE_DISPOSITION_INFO_EX, FILE_MAXIMUM_DISPOSITION, FILE_NON_DIRECTORY_FILE,
+    FILE_NO_EA_KNOWLEDGE, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
@@ -38,6 +57,7 @@ use winfsp::filesystem::{
 use winfsp::util::SafeDropHandle;
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
+use crate::fsp::lfs::{lfs_open_file, lfs_read_file};
 use crate::fsp::util::{quadpart_to_u64, systemtime_to_filetime, win32_try};
 
 /// Do an operation that requires a real file handle with optional else block for virtual directories.
@@ -92,6 +112,14 @@ enum ProjectedHandle {
 
 fn join_remainder_windows_semantics(left: impl AsRef<OsStr>, right: impl AsRef<OsStr>) -> OsString {
     [left.as_ref(), right.as_ref()].join(OsStr::new("\\"))
+}
+
+fn dos_path_to_nt_path(path: impl AsRef<OsStr>) -> OsString {
+    assert!(matches!(
+        Path::new(path.as_ref()).components().next(),
+        Some(Prefix(_))
+    ));
+    [OsStr::new(r"\??\"), path.as_ref()].join(OsStr::new(""))
 }
 
 #[repr(C)]
@@ -214,6 +242,7 @@ impl ProjFsContext {
         let mut opt = OpenOptions::new();
         opt.access_mode(FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0);
         opt.custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0);
+        opt.share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0);
 
         let f = opt.open(path)?;
         let metadata = f.metadata()?;
@@ -240,41 +269,71 @@ impl ProjFsContext {
         })
     }
 
-    fn open_handle_internal<P: Into<HSTRING>>(
+    fn open_handle_internal<P: AsRef<OsStr>>(
+        &self,
         file_path: P,
         create_options: u32,
-        mut granted_access: FILE_ACCESS_FLAGS,
+        granted_access: FILE_ACCESS_FLAGS,
         request_access: FileAccess,
     ) -> winfsp::Result<HANDLE> {
-        let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
-        if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
-            create_flags |= FILE_FLAG_DELETE_ON_CLOSE
+        // todo: forbid access_delete
+        let is_directory = unsafe {
+            self.with_operation_response(|ctx| {
+                FILE_ATTRIBUTE_DIRECTORY.0 & ctx.Rsp.Create.Opened.FileInfo.FileAttributes != 0
+            })
         }
+        .unwrap_or(false);
 
-        if request_access == FileAccess::Read {
-            // remove write access to the file.
-            granted_access = FILE_GENERIC_EXECUTE | FILE_GENERIC_READ;
-        }
-
-        let file_path = file_path.into();
-
-        let handle = unsafe {
-            let handle = CreateFileW(
-                PCWSTR(file_path.as_ptr()),
-                granted_access,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                create_flags,
-                None,
-            )?;
-            if handle.is_invalid() {
-                return Err(FspError::from(GetLastError()));
-            }
-            handle
+        let mut maximum_access = if is_directory {
+            granted_access
+        } else {
+            // MAXIMUM_ALLOWED
+            FILE_ACCESS_FLAGS(0x02000000u32)
         };
 
-        Ok(handle)
+        let mut create_options =
+            create_options & (FILE_DIRECTORY_FILE | FILE_NON_DIRECTORY_FILE | FILE_NO_EA_KNOWLEDGE);
+
+        // WORKAROUND:
+        // WOW64 appears to have a bug in some versions of the OS (seen on Win10 1909 and
+        // Server 2012 R2), where NtQueryDirectoryFile may produce garbage if called on a
+        // directory that has been opened without FILE_SYNCHRONOUS_IO_NONALERT.
+        //
+        // Garbage:
+        // after a STATUS_PENDING has been waited, Iosb.Information reports bytes transferred
+        // but the buffer does not get filled
+
+        // Always open directories in a synchronous manner.
+
+        if is_directory {
+            maximum_access |= SYNCHRONIZE;
+            create_options |= FILE_SYNCHRONOUS_IO_NONALERT
+        }
+
+        let file_path = dos_path_to_nt_path(file_path);
+        let file_path = HSTRING::from(&file_path);
+
+        eprintln!("opening: {:?}", file_path);
+        let result = lfs_open_file(
+            PCWSTR(file_path.as_ptr()),
+            maximum_access.0,
+            FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | create_options,
+        );
+
+        match result {
+            Ok(handle) => Ok(handle),
+            Err(FspError::NTSTATUS(
+                STATUS_ACCESS_DENIED
+                | STATUS_MEDIA_WRITE_PROTECTED
+                | STATUS_SHARING_VIOLATION
+                | STATUS_INVALID_PARAMETER,
+            )) => lfs_open_file(
+                PCWSTR(file_path.as_ptr()),
+                granted_access.0,
+                FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | create_options,
+            ),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -350,7 +409,6 @@ impl FileSystemContext for ProjFsContext {
         granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
-
         if file_name.as_ref() == "\\" {
             let context = Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
@@ -372,9 +430,8 @@ impl FileSystemContext for ProjFsContext {
                         eprintln!("fp delete failed");
                         return Err(ERROR_ACCESS_DENIED.into());
                     }
-                    let file_path = HSTRING::from(source.as_os_str());
-                    let handle = Self::open_handle_internal(
-                        file_path,
+                    let handle = self.open_handle_internal(
+                        source.as_os_str(),
                         create_options,
                         granted_access,
                         *access,
@@ -411,12 +468,11 @@ impl FileSystemContext for ProjFsContext {
                     Some(remainder),
                 ) => {
                     let file_path = join_remainder_windows_semantics(source, remainder);
-                    let file_path = HSTRING::from(file_path.as_os_str());
-                    eprintln!("{}", file_path);
+                    eprintln!("{:?}", file_path);
 
                     // todo: check with protectlist.
-                    let handle = Self::open_handle_internal(
-                        file_path,
+                    let handle = self.open_handle_internal(
+                        file_path.as_os_str(),
                         create_options,
                         granted_access,
                         *access,
@@ -462,9 +518,10 @@ impl FileSystemContext for ProjFsContext {
             return match entry {
                 ProjectionEntry::Portal { source, name, .. } => {
                     // true parent
-                    let parent = remainder
-                        .map_or_else(|| source.clone().into_os_string(),
-                                     |remainder| join_remainder_windows_semantics(source, remainder));
+                    let parent = remainder.map_or_else(
+                        || source.clone().into_os_string(),
+                        |remainder| join_remainder_windows_semantics(source, remainder),
+                    );
                     let target_path = join_remainder_windows_semantics(parent, new_filename);
                     if target_path.as_os_str().len() > FULLPATH_SIZE {
                         return Err(STATUS_OBJECT_NAME_INVALID.into());
@@ -561,8 +618,8 @@ impl FileSystemContext for ProjFsContext {
                 }
 
                 if let Some(source_path) = &context.handle.get_real_path() {
-                    let target_path = join_remainder_windows_semantics(source,
-                                                                       target_remainder.unwrap());
+                    let target_path =
+                        join_remainder_windows_semantics(source, target_remainder.unwrap());
 
                     eprintln!("mv: source {:?}", source_path);
                     eprintln!("mv: target {:?}", target_path);
@@ -660,29 +717,21 @@ impl FileSystemContext for ProjFsContext {
     ) -> winfsp::Result<IoResult> {
         let mut bytes_read = 0;
         require_handle!(&context.handle, handle => {
-            let mut overlapped = OVERLAPPED {
-                Anonymous: OVERLAPPED_0 {
-                    Anonymous: OVERLAPPED_0_0 {
-                        Offset: offset as u32,
-                        OffsetHigh: (offset >> 32) as u32,
-                    },
-                },
-                ..Default::default()
-            };
-
-            win32_try!(unsafe ReadFile(
-                *handle.deref(),
-                buffer.as_mut_ptr() as *mut _,
-                buffer.len() as u32,
-                &mut bytes_read,
-                &mut overlapped,
-            ));
+            let result = lfs_read_file(*handle.deref(), buffer, offset, &mut bytes_read);
+            if result == STATUS_SUCCESS {
+                  return Ok(IoResult {
+                    bytes_transferred: bytes_read as u32,
+                    io_pending: false,
+                })
+            } else if result == STATUS_PENDING {
+                return Ok(IoResult {
+                    bytes_transferred: bytes_read as u32,
+                    io_pending: true,
+                })
+            } else {
+                return Err(result.into())
+            }
         });
-
-        Ok(IoResult {
-            bytes_transferred: bytes_read,
-            io_pending: false,
-        })
     }
 
     fn read_directory<P: Into<PCWSTR>>(
@@ -997,8 +1046,11 @@ impl FileSystemContext for ProjFsContext {
                 eprintln!("succ set not replace")
             }
 
-            eprintln!("ow: try realloc");
-            let alloc_info = FILE_ALLOCATION_INFO::default();
+            eprintln!("ow: try realloc for handle {:?}", handle.deref());
+            let alloc_info = FILE_ALLOCATION_INFO {
+                AllocationSize: ALLOCATION_UNIT as i64
+            };
+
             win32_try!(unsafe SetFileInformationByHandle(
                 *handle.deref(),
                 FileAllocationInfo,
