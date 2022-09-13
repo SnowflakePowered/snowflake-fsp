@@ -31,11 +31,9 @@ pub struct SafeDropHandle(HANDLE);
 impl SafeDropHandle {
     /// Invalidate the handle without dropping it.
     pub fn invalidate(&mut self) {
-        if !self.0.is_invalid() {
-            unsafe {
-                if let Err(_) = NtClose(self.0) {
-                    CloseHandle(self.0);
-                }
+        unsafe {
+            if !self.0.is_invalid() && NtClose(self.0).is_err() {
+                CloseHandle(self.0);
             }
         }
         self.0 = INVALID_HANDLE_VALUE
@@ -45,7 +43,7 @@ impl SafeDropHandle {
 impl Drop for SafeDropHandle {
     fn drop(&mut self) {
         unsafe {
-            if !self.0.is_invalid() {
+            if !self.0.is_invalid() && NtClose(self.0).is_err() {
                 CloseHandle(self.0);
             }
         }

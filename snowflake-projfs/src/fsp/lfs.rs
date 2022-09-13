@@ -45,11 +45,12 @@ pub fn lfs_create_file<P: Into<PCWSTR>>(
     file_path: P,
     desired_access: u32,
     security_descriptor: PSECURITY_DESCRIPTOR,
-    allocation_size: &mut i64,
+    allocation_size: Option<&mut i64>,
     file_attributes: u32,
     create_disposition: u32,
     create_options: u32,
-    ea_buffer: Option<&mut [u8]>,
+    ea_buffer: &mut Option<&mut [u8]>,
+    parent: Option<HANDLE>,
 ) -> winfsp::Result<HANDLE> {
     let mut unicode_filename = unsafe {
         let mut unicode_filename: MaybeUninit<UNICODE_STRING> = MaybeUninit::uninit();
@@ -58,20 +59,22 @@ pub fn lfs_create_file<P: Into<PCWSTR>>(
     };
 
     let mut object_attrs =
-        initialize_object_attributes(&mut unicode_filename, 0, None, Some(security_descriptor));
+        initialize_object_attributes(&mut unicode_filename, 0, parent, Some(security_descriptor));
 
     let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
     let mut handle = INVALID_HANDLE_VALUE;
 
-    let result = if let Some(buffer) = ea_buffer {
+    let result = if let Some(buffer) = ea_buffer.as_deref_mut() {
         // the lifetime of buffer has to last until after NtCreateFile.
-       NTSTATUS(unsafe {
+        NTSTATUS(unsafe {
             NtCreateFile(
                 &mut handle.0,
                 FILE_READ_ATTRIBUTES.0 | desired_access,
                 &mut object_attrs,
                 iosb.as_mut_ptr(),
-                allocation_size,
+                allocation_size
+                    .map(|r| r as *mut i64)
+                    .unwrap_or(std::ptr::null_mut()),
                 file_attributes,
                 (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
                 create_disposition,
@@ -87,7 +90,9 @@ pub fn lfs_create_file<P: Into<PCWSTR>>(
                 FILE_READ_ATTRIBUTES.0 | desired_access,
                 &mut object_attrs,
                 iosb.as_mut_ptr(),
-                allocation_size,
+                allocation_size
+                    .map(|r| r as *mut i64)
+                    .unwrap_or(std::ptr::null_mut()),
                 file_attributes,
                 (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0,
                 create_disposition,

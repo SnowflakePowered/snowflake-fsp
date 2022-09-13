@@ -30,11 +30,12 @@ use windows::Win32::Storage::FileSystem::{
     SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
     FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_CREATION_DISPOSITION, FILE_DISPOSITION_INFO,
-    FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-    FILE_NAME, FILE_OPEN_IF, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_CREATE, FILE_CREATION_DISPOSITION,
+    FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_OPEN_IF, FILE_OVERWRITE,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SUPERSEDE,
+    FILE_WRITE_DATA, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS,
     OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
 };
 use windows::Win32::System::WindowsProgramming::{
@@ -45,6 +46,7 @@ use windows::Win32::System::WindowsProgramming::{
     FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
+use windows_sys::Win32::System::WindowsProgramming::NtClose;
 
 use snowflake_projfs_common::path::{OwnedProjectedPath, ProjectedPath};
 use snowflake_projfs_common::projections::{FileAccess, Projection, ProjectionEntry};
@@ -57,7 +59,7 @@ use winfsp::filesystem::{
 use winfsp::util::SafeDropHandle;
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
-use crate::fsp::lfs::{lfs_open_file, lfs_read_file};
+use crate::fsp::lfs::{lfs_create_file, lfs_open_file, lfs_read_file};
 use crate::fsp::util::{quadpart_to_u64, systemtime_to_filetime, win32_try};
 
 /// Do an operation that requires a real file handle with optional else block for virtual directories.
@@ -336,11 +338,101 @@ impl ProjFsContext {
                 | STATUS_MEDIA_WRITE_PROTECTED
                 | STATUS_SHARING_VIOLATION
                 | STATUS_INVALID_PARAMETER,
-            )) => lfs_open_file(
+            )) if maximum_access.0 == 0x02000000u32 => lfs_open_file(
                 PCWSTR(file_path.as_ptr()),
                 granted_access.0,
                 FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | create_options,
             ),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn create_file_internal<P: AsRef<OsStr>>(
+        file_path: P,
+        create_options: u32,
+        granted_access: FILE_ACCESS_FLAGS,
+        file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
+        security_descriptor: PSECURITY_DESCRIPTOR,
+        allocation_size: i64,
+        mut reparse_buffer: Option<&mut [u8]>,
+        request_access: FileAccess,
+    ) -> winfsp::Result<HANDLE> {
+        // todo: forbid access_delete
+        let is_directory = create_options & FILE_DIRECTORY_FILE != 0;
+
+        let mut maximum_access = if is_directory {
+            granted_access
+        } else {
+            // MAXIMUM_ALLOWED
+            FILE_ACCESS_FLAGS(0x02000000u32)
+        };
+
+        let mut create_options =
+            create_options & (FILE_DIRECTORY_FILE | FILE_NON_DIRECTORY_FILE | FILE_NO_EA_KNOWLEDGE);
+
+        // WORKAROUND:
+        // WOW64 appears to have a bug in some versions of the OS (seen on Win10 1909 and
+        // Server 2012 R2), where NtQueryDirectoryFile may produce garbage if called on a
+        // directory that has been opened without FILE_SYNCHRONOUS_IO_NONALERT.
+        //
+        // Garbage:
+        // after a STATUS_PENDING has been waited, Iosb.Information reports bytes transferred
+        // but the buffer does not get filled
+
+        // Always open directories in a synchronous manner.
+
+        if is_directory {
+            maximum_access |= SYNCHRONIZE;
+            create_options |= FILE_SYNCHRONOUS_IO_NONALERT
+        }
+
+        // todo: use ntsemantics
+        let file_path = dos_path_to_nt_path(file_path);
+        let file_path = HSTRING::from(&file_path);
+
+        eprintln!("path {:?}", file_path);
+        let mut allocation_size = if allocation_size != 0 {
+            Some(allocation_size)
+        } else {
+            None
+        };
+
+        let file_attributes = if file_attributes.0 == 0 {
+            FILE_ATTRIBUTE_NORMAL
+        } else {
+            file_attributes
+        };
+
+        eprintln!("creating: {:?}", file_path);
+        let result = lfs_create_file(
+            PCWSTR(file_path.as_ptr()),
+            maximum_access.0,
+            security_descriptor,
+            allocation_size.as_mut(),
+            file_attributes.0,
+            FILE_CREATE.0,
+            FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | create_options,
+            &mut reparse_buffer,
+            None,
+        );
+
+        match result {
+            Ok(handle) => Ok(handle),
+            Err(FspError::NTSTATUS(STATUS_INVALID_PARAMETER))
+                if maximum_access.0 == 0x02000000u32 =>
+            {
+                lfs_create_file(
+                    PCWSTR(file_path.as_ptr()),
+                    maximum_access.0,
+                    security_descriptor,
+                    allocation_size.as_mut(),
+                    file_attributes.0,
+                    FILE_CREATE.0,
+                    FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | create_options,
+                    &mut reparse_buffer,
+                    None,
+                )
+            }
             Err(e) => Err(e),
         }
     }
@@ -477,8 +569,6 @@ impl FileSystemContext for ProjFsContext {
                     Some(remainder),
                 ) => {
                     let file_path = join_remainder_windows_semantics(source, remainder);
-                    eprintln!("{:?}", file_path);
-
                     // todo: check with protectlist.
                     let handle = self.open_handle_internal(
                         file_path.as_os_str(),
@@ -510,9 +600,9 @@ impl FileSystemContext for ProjFsContext {
         file_name: P,
         create_options: u32,
         granted_access: FILE_ACCESS_FLAGS,
-        mut file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
+        file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
         security_descriptor: PSECURITY_DESCRIPTOR,
-        _allocation_size: u64,
+        allocation_size: u64,
         _extra_buffer: Option<&[u8]>,
         _extra_buffer_is_reparse_point: bool,
         file_info: &mut FSP_FSCTL_FILE_INFO,
@@ -522,6 +612,7 @@ impl FileSystemContext for ProjFsContext {
         let parent = new_path.parent().ok_or(STATUS_OBJECT_NAME_INVALID)?;
         let new_filename = new_path.file_name().ok_or(STATUS_OBJECT_NAME_INVALID)?;
 
+        // todo: fix semantics when replacing a File projection.
         eprintln!("cr: {:?} under {:?}", new_path, parent);
         if let Some((entry, remainder)) = self.projections.search_entry_case_insensitive(parent) {
             return match entry {
@@ -529,52 +620,23 @@ impl FileSystemContext for ProjFsContext {
                     // true parent
                     let parent = remainder.map_or_else(
                         || source.clone().into_os_string(),
-                        |remainder| join_remainder_nt_semantics(source, remainder),
+                        |remainder| join_remainder_windows_semantics(source, remainder),
                     );
-                    let target_path = join_remainder_nt_semantics(parent, new_filename);
+                    let target_path = join_remainder_windows_semantics(parent, new_filename);
                     if target_path.as_os_str().len() > FULLPATH_SIZE {
                         return Err(STATUS_OBJECT_NAME_INVALID.into());
                     }
 
-                    let security_attributes = SECURITY_ATTRIBUTES {
-                        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                        lpSecurityDescriptor: security_descriptor.0,
-                        bInheritHandle: false.into(),
-                    };
-
-                    let mut create_flags = FILE_FLAG_BACKUP_SEMANTICS;
-                    if (create_options & FILE_DELETE_ON_CLOSE) != 0 {
-                        create_flags |= FILE_FLAG_DELETE_ON_CLOSE;
-                    }
-
-                    if (create_options & FILE_DIRECTORY_FILE) != 0 {
-                        create_flags |= FILE_FLAG_POSIX_SEMANTICS;
-                        file_attributes |= FILE_ATTRIBUTE_DIRECTORY
-                    } else {
-                        file_attributes &= !FILE_ATTRIBUTE_DIRECTORY
-                    }
-
-                    if file_attributes == FILE_FLAGS_AND_ATTRIBUTES(0) {
-                        file_attributes = FILE_ATTRIBUTE_NORMAL
-                    }
-
-                    let target_path = HSTRING::from(target_path.as_os_str());
-
-                    let handle = unsafe {
-                        let handle = CreateFileW(
-                            PCWSTR(target_path.as_ptr()),
-                            granted_access,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            &security_attributes,
-                            CREATE_NEW,
-                            create_flags | file_attributes,
-                            None,
-                        )?;
-                        if handle.is_invalid() {
-                            return Err(FspError::from(GetLastError()));
-                        }
-                        handle
-                    };
+                    let handle = Self::create_file_internal(
+                        target_path,
+                        create_options,
+                        granted_access,
+                        file_attributes,
+                        security_descriptor,
+                        allocation_size as i64,
+                        None,
+                        FileAccess::ReadWrite,
+                    )?;
 
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Real {
@@ -867,7 +929,6 @@ impl FileSystemContext for ProjFsContext {
                         }
                         dirinfo.set_file_name(filename)?;
                         if let Err(e) = buffer.write(&mut dirinfo) {
-                            eprintln!("{:?}", e);
                             drop(buffer);
                             return Err(e);
                         }
@@ -1008,65 +1069,41 @@ impl FileSystemContext for ProjFsContext {
         context: &Self::FileContext,
         file_attributes: FILE_FLAGS_AND_ATTRIBUTES,
         replace_file_attributes: bool,
-        _allocation_size: u64,
+        allocation_size: u64,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<()> {
         // todo: preserve allocation size
         eprintln!("ow {:?}", context.handle.get_real_path());
         require_handle!(&context.handle, handle => {
-            let mut attribute_tag_info = FILE_ATTRIBUTE_TAG_INFO::default();
-            if replace_file_attributes {
-                let basic_info = FILE_BASIC_INFO {
-                    FileAttributes: if file_attributes == FILE_FLAGS_AND_ATTRIBUTES(0) {
+
+            let mut allocation_size = if allocation_size != 0 {
+                Some(allocation_size as i64)
+            } else {
+                None
+            };
+
+
+            let new_handle = lfs_create_file(windows::w!(""), if replace_file_attributes {
+                    0x00010000u32
+                } else {
+                    FILE_WRITE_DATA.0
+                }, PSECURITY_DESCRIPTOR::default(), allocation_size.as_mut(), (if replace_file_attributes {
+                    if file_attributes.0 == 0 {
                         FILE_ATTRIBUTE_NORMAL
                     } else {
                         file_attributes
                     }
-                        .0,
-                    ..Default::default()
-                };
+                } else {
+                    file_attributes
+                }).0, (if replace_file_attributes {
+                    FILE_SUPERSEDE
+                } else {
+                    FILE_OVERWRITE
+                }).0, FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT, &mut None, None)?;
 
-                win32_try!(unsafe SetFileInformationByHandle(
-                    *handle.deref(),
-                    FileBasicInfo,
-                    (&basic_info as *const FILE_BASIC_INFO).cast(),
-                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
-                ));
-
-                eprintln!("succ set replace")
-            } else if file_attributes != FILE_FLAGS_AND_ATTRIBUTES(0) {
-                let mut basic_info = FILE_BASIC_INFO::default();
-                win32_try!(unsafe GetFileInformationByHandleEx(
-                    *handle.deref(),
-                    FileAllocationInfo,
-                    (&mut attribute_tag_info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-                    std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-                ));
-
-                basic_info.FileAttributes = file_attributes.0 | attribute_tag_info.FileAttributes;
-                if basic_info.FileAttributes.bitxor(file_attributes.0) != 0 {
-                    win32_try!(unsafe SetFileInformationByHandle(
-                        *handle.deref(),
-                        FileBasicInfo,
-                        (&basic_info as *const FILE_BASIC_INFO).cast(),
-                        std::mem::size_of::<FILE_BASIC_INFO>() as u32,
-                    ));
-                }
-                eprintln!("succ set not replace")
+            unsafe {
+                NtClose(new_handle.0);
             }
-
-            eprintln!("ow: try realloc for handle {:?}", handle.deref());
-            let alloc_info = FILE_ALLOCATION_INFO {
-                AllocationSize: ALLOCATION_UNIT as i64
-            };
-
-            win32_try!(unsafe SetFileInformationByHandle(
-                *handle.deref(),
-                FileAllocationInfo,
-                (&alloc_info as *const FILE_ALLOCATION_INFO).cast(),
-                std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
-            ));
-            eprintln!("ow: reallocgood");
         });
 
         self.get_file_info_internal(context, file_info)
