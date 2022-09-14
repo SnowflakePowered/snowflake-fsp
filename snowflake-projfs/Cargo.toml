@@ -17,5 +17,6 @@ time = "0.3.14"
 snowflake-projfs-common = { path = "../snowflake-projfs-common" }
 snowflake-projfs-fsp = { path = "../snowflake-projfs-fsp" }
 
+memoffset = { version = "0.6.5", features = ["unstable_const"]}
 [build-dependencies]
 winfsp = { path = "../winfsp" }

@@ -90,7 +90,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
 
     fn flush(
         &self,
-        context: &Self::FileContext,
+        context: Option<&Self::FileContext>,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<()> {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())

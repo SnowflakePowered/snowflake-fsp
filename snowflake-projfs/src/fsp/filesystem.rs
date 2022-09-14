@@ -14,7 +14,7 @@ use widestring::{U16Str, U16String};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     GetLastError, BOOLEAN, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
-    ERROR_FILE_OFFLINE, ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_ACCESS_DENIED,
+    ERROR_FILE_OFFLINE, ERROR_INVALID_NAME, HANDLE, MAX_PATH, NTSTATUS, STATUS_ACCESS_DENIED,
     STATUS_INVALID_PARAMETER, STATUS_MEDIA_WRITE_PROTECTED, STATUS_OBJECT_NAME_INVALID,
     STATUS_PENDING, STATUS_SHARING_VIOLATION, STATUS_SUCCESS, UNICODE_STRING,
 };
@@ -24,11 +24,11 @@ use windows::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
-    FileEndOfFileInfo, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, NtCreateFile, ReadFile,
-    SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
-    FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+    FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
+    FileEndOfFileInfo, FileRenameInfoEx, FlushFileBuffers, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW,
+    NtCreateFile, ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION,
+    CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_CREATE, FILE_CREATION_DISPOSITION,
     FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES,
@@ -46,7 +46,7 @@ use windows::Win32::System::WindowsProgramming::{
     FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
-use windows_sys::Win32::System::WindowsProgramming::NtClose;
+use windows_sys::Win32::System::WindowsProgramming::{NtClose, IO_STATUS_BLOCK};
 
 use snowflake_projfs_common::path::{OwnedProjectedPath, ProjectedPath};
 use snowflake_projfs_common::projections::{FileAccess, Projection, ProjectionEntry};
@@ -56,10 +56,14 @@ use winfsp::filesystem::{
     DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, IoResult, FSP_FSCTL_FILE_INFO,
     FSP_FSCTL_VOLUME_INFO,
 };
-use winfsp::util::SafeDropHandle;
+use winfsp::util::{NtSafeHandle, Win32SafeHandle};
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
-use crate::fsp::lfs::{lfs_create_file, lfs_open_file, lfs_read_file};
+use crate::fsp::lfs::{
+    lfs_create_file, lfs_open_file, lfs_read_file, lfs_rename, lfs_unlink, lfs_write_file,
+    LfsRenameSemantics,
+};
+use crate::fsp::nt;
 use crate::fsp::util::{quadpart_to_u64, systemtime_to_filetime, win32_try};
 
 /// Do an operation that requires a real file handle with optional else block for virtual directories.
@@ -100,14 +104,16 @@ pub struct ProjFsContext {
     projections: Projection,
 }
 
+#[derive(Debug)]
 enum ProjectedHandle {
     /// A real file opened under a portal.
     Real {
-        handle: SafeDropHandle,
+        handle: NtSafeHandle,
         portal: OwnedProjectedPath,
+        is_directory: bool,
     },
     /// A projected file or directory that points to a real filesystem entry.
-    Projected(SafeDropHandle),
+    Projected(NtSafeHandle),
     /// A directory with a canonical path in the projection tree.
     Directory(OwnedProjectedPath),
 }
@@ -133,6 +139,7 @@ fn dos_path_to_nt_path(path: impl AsRef<OsStr>) -> OsString {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct ProjFsFileContext {
     handle: ProjectedHandle,
     dir_buffer: DirBuffer,
@@ -252,11 +259,11 @@ impl ProjFsContext {
         let mut opt = OpenOptions::new();
         opt.access_mode(FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0);
         opt.custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0);
-        opt.share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0);
+        opt.share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0);
 
         let f = opt.open(path)?;
         let metadata = f.metadata()?;
-        let handle = SafeDropHandle::from(HANDLE(f.into_raw_handle() as isize));
+        let handle = Win32SafeHandle::from(HANDLE(f.into_raw_handle() as isize));
 
         let mut len_needed = 0;
         if let Some(descriptor_len) = descriptor_len {
@@ -280,20 +287,14 @@ impl ProjFsContext {
     }
 
     fn open_handle_internal<P: AsRef<OsStr>>(
-        &self,
         file_path: P,
+        is_directory: bool,
         create_options: u32,
         granted_access: FILE_ACCESS_FLAGS,
         request_access: FileAccess,
-    ) -> winfsp::Result<HANDLE> {
+    ) -> winfsp::Result<NtSafeHandle> {
         // todo: forbid access_delete
-        let is_directory = unsafe {
-            self.with_operation_response(|ctx| {
-                FILE_ATTRIBUTE_DIRECTORY.0 & ctx.Rsp.Create.Opened.FileInfo.FileAttributes != 0
-            })
-        }
-        .unwrap_or(false);
-
+        let backup_access = granted_access.0;
         let mut maximum_access = if is_directory {
             granted_access
         } else {
@@ -324,12 +325,13 @@ impl ProjFsContext {
         let file_path = dos_path_to_nt_path(file_path);
         let file_path = HSTRING::from(&file_path);
 
-        eprintln!("opening: {:?}", file_path);
         let result = lfs_open_file(
             PCWSTR(file_path.as_ptr()),
             maximum_access.0,
             FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | create_options,
         );
+
+        eprintln!("op: {:?}: {:?}", file_path, result);
 
         match result {
             Ok(handle) => Ok(handle),
@@ -340,7 +342,7 @@ impl ProjFsContext {
                 | STATUS_INVALID_PARAMETER,
             )) if maximum_access.0 == 0x02000000u32 => lfs_open_file(
                 PCWSTR(file_path.as_ptr()),
-                granted_access.0,
+                backup_access,
                 FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | create_options,
             ),
             Err(e) => Err(e),
@@ -356,7 +358,7 @@ impl ProjFsContext {
         allocation_size: i64,
         mut reparse_buffer: Option<&mut [u8]>,
         request_access: FileAccess,
-    ) -> winfsp::Result<HANDLE> {
+    ) -> winfsp::Result<NtSafeHandle> {
         // todo: forbid access_delete
         let is_directory = create_options & FILE_DIRECTORY_FILE != 0;
 
@@ -390,7 +392,6 @@ impl ProjFsContext {
         let file_path = dos_path_to_nt_path(file_path);
         let file_path = HSTRING::from(&file_path);
 
-        eprintln!("path {:?}", file_path);
         let mut allocation_size = if allocation_size != 0 {
             Some(allocation_size)
         } else {
@@ -403,7 +404,6 @@ impl ProjFsContext {
             file_attributes
         };
 
-        eprintln!("creating: {:?}", file_path);
         let result = lfs_create_file(
             PCWSTR(file_path.as_ptr()),
             maximum_access.0,
@@ -415,6 +415,8 @@ impl ProjFsContext {
             &mut reparse_buffer,
             None,
         );
+
+        eprintln!("cr: {:?}: {:?}", file_path, result);
 
         match result {
             Ok(handle) => Ok(handle),
@@ -531,14 +533,25 @@ impl FileSystemContext for ProjFsContext {
                         eprintln!("fp delete failed");
                         return Err(ERROR_ACCESS_DENIED.into());
                     }
-                    let handle = self.open_handle_internal(
+
+                    let is_directory = unsafe {
+                        self.with_operation_response(|ctx| {
+                            FILE_ATTRIBUTE_DIRECTORY.0
+                                & ctx.Rsp.Create.Opened.FileInfo.FileAttributes
+                                != 0
+                        })
+                    }
+                    .unwrap_or(false);
+
+                    let handle = Self::open_handle_internal(
                         source.as_os_str(),
+                        is_directory,
                         create_options,
                         granted_access,
                         *access,
                     )?;
                     let context = Self::FileContext {
-                        handle: ProjectedHandle::Projected(SafeDropHandle::from(handle)),
+                        handle: ProjectedHandle::Projected(handle),
                         dir_buffer: Default::default(),
                     };
 
@@ -570,16 +583,28 @@ impl FileSystemContext for ProjFsContext {
                 ) => {
                     let file_path = join_remainder_windows_semantics(source, remainder);
                     // todo: check with protectlist.
-                    let handle = self.open_handle_internal(
+
+                    let is_directory = unsafe {
+                        self.with_operation_response(|ctx| {
+                            FILE_ATTRIBUTE_DIRECTORY.0
+                                & ctx.Rsp.Create.Opened.FileInfo.FileAttributes
+                                != 0
+                        })
+                    }
+                    .unwrap_or(false);
+
+                    let handle = Self::open_handle_internal(
                         file_path.as_os_str(),
+                        is_directory,
                         create_options,
                         granted_access,
                         *access,
                     )?;
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Real {
-                            handle: SafeDropHandle::from(handle),
+                            handle,
                             portal: name.clone(),
+                            is_directory,
                         },
                         dir_buffer: Default::default(),
                     };
@@ -593,7 +618,10 @@ impl FileSystemContext for ProjFsContext {
         Err(ERROR_FILE_OFFLINE.into())
     }
 
-    fn close(&self, _context: Self::FileContext) {}
+    fn close(&self, context: Self::FileContext) {
+        eprintln!("cl: {:?}", context);
+        drop(context)
+    }
 
     fn create<P: AsRef<OsStr>>(
         &self,
@@ -640,8 +668,9 @@ impl FileSystemContext for ProjFsContext {
 
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Real {
-                            handle: SafeDropHandle::from(handle),
+                            handle,
                             portal: name.clone(),
+                            is_directory: create_options & FILE_DIRECTORY_FILE != 0,
                         },
                         dir_buffer: Default::default(),
                     };
@@ -649,7 +678,12 @@ impl FileSystemContext for ProjFsContext {
                     self.get_file_info_internal(&context, file_info)?;
                     Ok(context)
                 }
-                _ => Err(ERROR_ACCESS_DENIED.into()),
+                entry => {
+                    // todo: allow 'create' under certain circumstances
+                    // create error: Directory { name: OwnedProjectedPath("/") } (original: "\\wiiu"), opts: 2200021, access: FILE_ACCESS_FLAGS(1048577), flags: FILE_FLAGS_AND_ATTRIBUTES(16)
+                    eprintln!("create error: {:?} (original: {:?}), opts: {:x}, access: {:?}, flags: {:?}", entry, file_name.as_ref(), create_options, granted_access, file_attributes);
+                    Err(ERROR_ACCESS_DENIED.into())
+                }
             };
         } else {
             eprintln!("could not find parent {:?}", parent);
@@ -664,7 +698,12 @@ impl FileSystemContext for ProjFsContext {
         new_file_name: P,
         replace_if_exists: bool,
     ) -> winfsp::Result<()> {
-        if let ProjectedHandle::Real { portal, .. } = &context.handle {
+        if let ProjectedHandle::Real {
+            portal,
+            is_directory,
+            handle,
+        } = &context.handle
+        {
             // WinFSP treats filenames as case-insensitive and gives us an uppercase name.
             // We need to resolve it against the case-sensitive projections.
             let target_portal = self
@@ -690,25 +729,51 @@ impl FileSystemContext for ProjFsContext {
 
                 if let Some(source_path) = &context.handle.get_real_path() {
                     let target_path =
-                        join_remainder_windows_semantics(source, target_remainder.unwrap());
+                        join_remainder_nt_semantics(source, target_remainder.unwrap());
+                    // todo: if (FSP_FSCTL_TRANSACT_PATH_SIZEMAX < FileRenInfo.V.FileNameLength)
 
-                    eprintln!("mv: source {:?}", source_path);
-                    eprintln!("mv: target {:?}", target_path);
-
-                    let source_path = HSTRING::from(source_path.as_os_str());
-                    let target_path = HSTRING::from(target_path.as_os_str());
-
-                    win32_try!(unsafe MoveFileExW(
-                        PCWSTR::from_raw(source_path.as_ptr()),
-                        PCWSTR::from_raw(target_path.as_ptr()),
-                        if replace_if_exists {
-                            MOVEFILE_REPLACE_EXISTING
-                        } else {
-                            MOVE_FILE_FLAGS::default()
+                    let replace_mode = if replace_if_exists
+                        && (!*is_directory || unsafe {
+                            self.with_operation_request(|f| {
+                                (2 /*POSIX_SEMANTICS*/ & f.Req.SetInformation.Info.RenameEx.Flags) != 0
+                            })
                         }
-                    ));
+                        .unwrap_or(false))
+                    {
+                        LfsRenameSemantics::PosixReplaceSemantics
+                    } else if replace_if_exists {
+                        LfsRenameSemantics::NtReplaceSemantics
+                    } else {
+                        LfsRenameSemantics::DoNotReplace
+                    };
 
-                    return Ok(());
+                    let nt_target_path = HSTRING::from(target_path.as_os_str());
+
+                    let result = lfs_rename(*handle.deref(), nt_target_path, replace_mode);
+                    eprintln!("mv: {:?}: {:?}", target_path.as_os_str(), result);
+                    return if result.is_ok() {
+                        Ok(())
+                    } else {
+                        Err(result.into())
+                    };
+                    //
+                    // eprintln!("mv: source {:?}", source_path);
+                    // eprintln!("mv: target {:?}", target_path);
+                    //
+                    // let source_path = HSTRING::from(source_path.as_os_str());
+                    // let target_path = HSTRING::from(target_path.as_os_str());
+                    //
+                    // win32_try!(unsafe MoveFileExW(
+                    //     PCWSTR::from_raw(source_path.as_ptr()),
+                    //     PCWSTR::from_raw(target_path.as_ptr()),
+                    //     if replace_if_exists {
+                    //         MOVEFILE_REPLACE_EXISTING
+                    //     } else {
+                    //         MOVE_FILE_FLAGS::default()
+                    //     }
+                    // ));
+
+                    // return Ok(());
                 }
             }
         }
@@ -717,15 +782,21 @@ impl FileSystemContext for ProjFsContext {
 
     fn flush(
         &self,
-        context: &Self::FileContext,
+        context: Option<&Self::FileContext>,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<()> {
+        if context.is_none() {
+            return Ok(());
+        }
+        let context = context.unwrap();
         require_handle!(&context.handle, handle => {
-             if *handle.deref() == HANDLE(0) {
-                // we do not flush the whole volume, so just return ok
-                return Ok(());
+            let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
+            let result = unsafe {
+                nt::NtFlushBuffersFile(handle.deref().0, iosb.as_mut_ptr())
+            };
+            if result != STATUS_SUCCESS.0 {
+                return Err(NTSTATUS(result).into())
             }
-            win32_try!(unsafe FlushFileBuffers(*handle.deref()));
         });
 
         // it's fine if we also refresh data for virtdirs
@@ -800,6 +871,7 @@ impl FileSystemContext for ProjFsContext {
                     io_pending: true,
                 })
             } else {
+                eprintln!("read err: {:x}", result.0);
                 return Err(result.into())
             }
         });
@@ -829,7 +901,7 @@ impl FileSystemContext for ProjFsContext {
                     length
                 };
                 let full_path = unsafe { U16String::from_ptr(&full_path as *const u16, length as usize) };
-                eprintln!("rd: {:?}", full_path);
+                // eprintln!("rd: {:?}", full_path);
                 let readdir = fs::read_dir(full_path.to_os_string())?;
                 for entry in readdir {
                     dirinfo.reset();
@@ -966,30 +1038,25 @@ impl FileSystemContext for ProjFsContext {
                 }
             }
 
-            let mut overlapped = OVERLAPPED {
-                Anonymous: OVERLAPPED_0 {
-                    Anonymous: OVERLAPPED_0_0 {
-                        Offset: offset as u32,
-                        OffsetHigh: (offset >> 32) as u32,
-                    },
-                },
-                ..Default::default()
-            };
+            let mut bytes_read = 0;
 
-            let mut bytes_transferred = 0;
-            win32_try!(unsafe WriteFile(
-                *handle.deref(),
-                buffer.as_ptr().cast(),
-                buffer.len() as u32,
-                &mut bytes_transferred,
-                &mut overlapped,
-            ));
-
-            self.get_file_info_internal(context, file_info)?;
-            Ok(IoResult {
-                bytes_transferred,
-                io_pending: false,
-            })
+            let result = lfs_write_file(*handle.deref(), buffer, offset, &mut bytes_read);
+            if result == STATUS_SUCCESS {
+                self.get_file_info_internal(context, file_info)?;
+                return Ok(IoResult {
+                    bytes_transferred: bytes_read as u32,
+                    io_pending: false,
+                });
+            } else if result == STATUS_PENDING {
+                self.get_file_info_internal(context, file_info)?;
+                return Ok(IoResult {
+                    bytes_transferred: bytes_read as u32,
+                    io_pending: true,
+                });
+            } else {
+                eprintln!("write err: {:x}", result.0);
+                return Err(result.into());
+            }
         })
     }
 
@@ -1003,27 +1070,27 @@ impl FileSystemContext for ProjFsContext {
         last_change_time: u64,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<()> {
-        require_handle!(&context.handle, handle => {
-            let basic_info = FILE_BASIC_INFO {
-                FileAttributes: if file_attributes == INVALID_FILE_ATTRIBUTES {
-                    0
-                } else if file_attributes == 0 {
-                    FILE_ATTRIBUTE_NORMAL.0
-                } else {
-                    file_attributes
-                },
-                CreationTime: creation_time as i64,
-                LastAccessTime: last_access_time as i64,
-                LastWriteTime: last_write_time as i64,
-                ChangeTime: last_change_time as i64,
-            };
-            win32_try!(unsafe SetFileInformationByHandle(
-                *handle.deref(),
-                FileBasicInfo,
-                (&basic_info as *const FILE_BASIC_INFO).cast(),
-                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
-            ));
-        });
+        // require_handle!(&context.handle, handle => {
+        //     let basic_info = FILE_BASIC_INFO {
+        //         FileAttributes: if file_attributes == INVALID_FILE_ATTRIBUTES {
+        //             0
+        //         } else if file_attributes == 0 {
+        //             FILE_ATTRIBUTE_NORMAL.0
+        //         } else {
+        //             file_attributes
+        //         },
+        //         CreationTime: creation_time as i64,
+        //         LastAccessTime: last_access_time as i64,
+        //         LastWriteTime: last_write_time as i64,
+        //         ChangeTime: last_change_time as i64,
+        //     };
+        //     win32_try!(unsafe SetFileInformationByHandle(
+        //         *handle.deref(),
+        //         FileBasicInfo,
+        //         (&basic_info as *const FILE_BASIC_INFO).cast(),
+        //         std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        //     ));
+        // });
 
         self.get_file_info_internal(context, file_info)
     }
@@ -1073,7 +1140,7 @@ impl FileSystemContext for ProjFsContext {
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<()> {
         // todo: preserve allocation size
-        eprintln!("ow {:?}", context.handle.get_real_path());
+        // eprintln!("ow {:?}", context.handle.get_real_path());
         require_handle!(&context.handle, handle => {
 
             let mut allocation_size = if allocation_size != 0 {
@@ -1118,21 +1185,14 @@ impl FileSystemContext for ProjFsContext {
         // only allow delete of real files.
         eprintln!("del: {:?}", file_name.as_ref());
         if let ProjectedHandle::Real { handle, .. } = &context.handle {
-            let disposition_info = FILE_DISPOSITION_INFO_EX {
-                Flags: if delete_file {
-                    // need to remove from namespace immediately, otherwise the handle is still open.
-                    FILE_DISPOSITION_FLAG_DELETE
-                } else {
-                    FILE_DISPOSITION_FLAG_DO_NOT_DELETE
-                },
-            };
-
-            win32_try!(unsafe SetFileInformationByHandle(*handle.deref(),
-                FileDispositionInfoEx, (&disposition_info as *const FILE_DISPOSITION_INFO_EX).cast(),
-                std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32));
-            Ok(())
+            let result = lfs_unlink(*handle.deref(), delete_file);
+            if result.is_ok() {
+                Ok(())
+            } else {
+                Err(result.into())
+            }
         } else {
-            Err(ERROR_ACCESS_DENIED.into())
+            Err(STATUS_ACCESS_DENIED.into())
         }
     }
 
@@ -1144,8 +1204,10 @@ impl FileSystemContext for ProjFsContext {
     ) {
         if let ProjectedHandle::Real { handle, .. } = &mut context.handle {
             if flags & FspCleanupFlags::FspCleanupDelete as u32 != 0 {
+                lfs_unlink(*handle.deref_mut(), true);
                 handle.invalidate();
             }
+            // todo: Flags & FspCleanupSetAllocationSize
         }
     }
 }

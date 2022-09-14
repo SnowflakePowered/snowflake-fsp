@@ -14,6 +14,7 @@ use winfsp_sys::{
 
 use crate::error::Result;
 
+#[derive(Debug)]
 pub struct DirBuffer(PVOID);
 pub struct DirBufferLock<'a>(&'a mut DirBuffer);
 pub struct DirMarker<'a>(pub(crate) Option<&'a U16CStr>);

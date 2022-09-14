@@ -1,5 +1,6 @@
 #![feature(io_error_more)]
 #![feature(let_chains)]
+#![feature(const_ptr_offset_from, const_refs_to_cell)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate core;
