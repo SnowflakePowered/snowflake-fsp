@@ -1168,7 +1168,7 @@ impl FileSystemContext for ProjFsContext {
                     FILE_SUPERSEDE
                 } else {
                     FILE_OVERWRITE
-                }).0, FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT, &mut None, None)?;
+                }).0, FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT, &mut None, Some(**handle))?;
 
             unsafe {
                 NtClose(new_handle.0);
