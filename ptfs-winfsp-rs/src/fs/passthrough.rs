@@ -41,7 +41,7 @@ use winfsp::filesystem::{
     FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS,
 };
 
-use winfsp::util::{Win32SafeHandle, Win32SafeHandle};
+use winfsp::util::Win32SafeHandle;
 
 const ALLOCATION_UNIT: u16 = 4096;
 const VOLUME_LABEL: &HSTRING = w!("Snowflake");
@@ -302,6 +302,11 @@ impl FileSystemContext for PtfsContext {
         context: Option<&Self::FileContext>,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<()> {
+        if context.is_none() {
+            return Ok(());
+        }
+
+        let context = context.unwrap();
         if *context.handle == HANDLE(0) {
             // we do not flush the whole volume, so just return ok
             return Ok(());

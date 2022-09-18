@@ -30,11 +30,14 @@ impl ProjFsHost {
             FileInfoTimeout: 1000,
             ..Default::default()
         };
+
         volume_params.set_CaseSensitiveSearch(0);
         volume_params.set_CasePreservedNames(1);
         volume_params.set_UnicodeOnDisk(1);
         volume_params.set_PersistentAcls(1);
         volume_params.set_PostCleanupWhenModifiedOnly(1);
+        volume_params.set_PostDispositionWhenNecessaryOnly(1);
+        volume_params.set_RejectIrpPriorToTransact0(1);
         // volume_params.set_PassQueryDirectoryPattern(1);
         volume_params.set_FlushAndPurgeOnCleanup(1);
         volume_params.set_UmFileContextIsUserContext2(1);

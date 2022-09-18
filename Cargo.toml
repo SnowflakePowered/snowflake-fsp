@@ -2,6 +2,7 @@
 
 members = [
     "ptfs-winfsp-rs",
+    "ntptfs-winfsp-rs",
     "snowflake-projfs",
     "snowflake-projfs-common",
     "snowflake-projfs-fsp",

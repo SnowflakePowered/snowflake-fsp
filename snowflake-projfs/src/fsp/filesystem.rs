@@ -733,12 +733,14 @@ impl FileSystemContext for ProjFsContext {
                     // todo: if (FSP_FSCTL_TRANSACT_PATH_SIZEMAX < FileRenInfo.V.FileNameLength)
 
                     let replace_mode = if replace_if_exists
-                        && (!*is_directory || unsafe {
-                            self.with_operation_request(|f| {
-                                (2 /*POSIX_SEMANTICS*/ & f.Req.SetInformation.Info.RenameEx.Flags) != 0
+                        && (!*is_directory
+                            || unsafe {
+                                self.with_operation_request(|f| {
+                                (2 /*POSIX_SEMANTICS*/ & f.Req.SetInformation.Info.RenameEx.Flags)
+                                    != 0
                             })
-                        }
-                        .unwrap_or(false))
+                            }
+                            .unwrap_or(false))
                     {
                         LfsRenameSemantics::PosixReplaceSemantics
                     } else if replace_if_exists {

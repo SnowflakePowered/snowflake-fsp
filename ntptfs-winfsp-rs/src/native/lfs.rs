@@ -1,32 +1,29 @@
 use std::ffi::c_void;
-use std::mem::MaybeUninit;
-use std::ops::DerefMut;
+use std::mem::{size_of, MaybeUninit};
+use std::ops::{Deref, DerefMut};
 use std::ptr::addr_of_mut;
+use ntapi::ntioapi::{FILE_ALL_INFORMATION, FILE_ATTRIBUTE_TAG_INFORMATION, FILE_DISPOSITION_INFORMATION, FILE_STANDARD_INFORMATION, FileAllInformation, FileAttributeTagInformation, FileDispositionInformation, FileDispositionInformationEx, FileStandardInformation};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{
-    HANDLE, INVALID_HANDLE_VALUE, NTSTATUS, STATUS_ACCESS_DENIED, STATUS_CANNOT_DELETE,
-    STATUS_DIRECTORY_NOT_EMPTY, STATUS_FILE_DELETED, STATUS_OBJECT_NAME_COLLISION, STATUS_PENDING,
-    STATUS_SUCCESS,
-};
+use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, NTSTATUS, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_CANNOT_DELETE, STATUS_DIRECTORY_NOT_EMPTY, STATUS_FILE_DELETED, STATUS_OBJECT_NAME_COLLISION, STATUS_PENDING, STATUS_SUCCESS};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
-use windows::Win32::Storage::FileSystem::{
-    FileRenameInfoEx, FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE,
-};
+use windows::Win32::Storage::FileSystem::{FileRenameInfoEx, FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::System::WindowsProgramming::INFINITE;
 use windows_sys::core::HSTRING;
 
 use windows_sys::Win32::Foundation::{BOOLEAN, UNICODE_STRING};
 use windows_sys::Win32::Storage::FileSystem::{
-    NtCreateFile, SetFileInformationByHandle, FILE_DISPOSITION_INFO, FILE_RENAME_INFO,
+    NtCreateFile, SetFileInformationByHandle, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_INFO,
+    FILE_RENAME_INFO,
 };
 
-use crate::fsp::nt;
+use crate::native::nt;
 use windows_sys::Win32::System::WindowsProgramming::{
     NtOpenFile, RtlInitUnicodeString, FILE_DISPOSITION_INFO_EX, IO_STATUS_BLOCK, OBJECT_ATTRIBUTES,
 };
-use winfsp::util::{NtSafeHandle, SafeDropHandle, VariableSizedBox};
+use winfsp::filesystem::FSP_FSCTL_FILE_INFO;
+use winfsp::util::{NtSafeHandle, SafeDropHandle, VariableSizedBox, Win32SafeHandle};
+use crate::native::nt::NtQueryInformationFile;
 
 fn initialize_object_attributes(
     obj_name: &mut UNICODE_STRING,
@@ -53,7 +50,8 @@ fn new_thread_event() -> windows::core::Result<HANDLE> {
 }
 
 pub fn lfs_create_file<P: Into<PCWSTR>>(
-    file_path: P,
+    root_handle: HANDLE,
+    file_name: P,
     desired_access: u32,
     security_descriptor: PSECURITY_DESCRIPTOR,
     allocation_size: Option<&mut i64>,
@@ -61,16 +59,23 @@ pub fn lfs_create_file<P: Into<PCWSTR>>(
     create_disposition: u32,
     create_options: u32,
     ea_buffer: &mut Option<&mut [u8]>,
-    parent: Option<HANDLE>,
 ) -> winfsp::Result<NtSafeHandle> {
     let mut unicode_filename = unsafe {
         let mut unicode_filename: MaybeUninit<UNICODE_STRING> = MaybeUninit::uninit();
-        RtlInitUnicodeString(unicode_filename.as_mut_ptr(), file_path.into().0);
+        // wrapping add to get rid of slash..
+        RtlInitUnicodeString(
+            unicode_filename.as_mut_ptr(),
+            file_name.into().0.wrapping_add(1),
+        );
         unicode_filename.assume_init()
     };
 
-    let mut object_attrs =
-        initialize_object_attributes(&mut unicode_filename, 0, parent, Some(security_descriptor));
+    let mut object_attrs = initialize_object_attributes(
+        &mut unicode_filename,
+        0,
+        Some(root_handle),
+        Some(security_descriptor),
+    );
 
     let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
     let mut handle = NtSafeHandle::from(INVALID_HANDLE_VALUE);
@@ -80,7 +85,7 @@ pub fn lfs_create_file<P: Into<PCWSTR>>(
         NTSTATUS(unsafe {
             NtCreateFile(
                 &mut handle.deref_mut().0,
-                0x00010000 | FILE_READ_ATTRIBUTES.0 | desired_access,
+                FILE_READ_ATTRIBUTES.0 | desired_access,
                 &mut object_attrs,
                 iosb.as_mut_ptr(),
                 allocation_size
@@ -98,7 +103,7 @@ pub fn lfs_create_file<P: Into<PCWSTR>>(
         NTSTATUS(unsafe {
             NtCreateFile(
                 &mut handle.deref_mut().0,
-                0x00010000 | FILE_READ_ATTRIBUTES.0 | desired_access,
+                FILE_READ_ATTRIBUTES.0 | desired_access,
                 &mut object_attrs,
                 iosb.as_mut_ptr(),
                 allocation_size
@@ -120,18 +125,25 @@ pub fn lfs_create_file<P: Into<PCWSTR>>(
         Ok(handle)
     }
 }
+
 pub fn lfs_open_file<P: Into<PCWSTR>>(
-    file_path: P,
+    root_handle: HANDLE,
+    file_name: P,
     desired_access: u32,
     open_options: u32,
 ) -> winfsp::Result<NtSafeHandle> {
     let mut unicode_filename = unsafe {
         let mut unicode_filename: MaybeUninit<UNICODE_STRING> = MaybeUninit::uninit();
-        RtlInitUnicodeString(unicode_filename.as_mut_ptr(), file_path.into().0);
+        // wrapping add to get rid of slash..
+        RtlInitUnicodeString(
+            unicode_filename.as_mut_ptr(),
+            file_name.into().0.wrapping_add(1),
+        );
         unicode_filename.assume_init()
     };
 
-    let mut object_attrs = initialize_object_attributes(&mut unicode_filename, 0, None, None);
+    let mut object_attrs =
+        initialize_object_attributes(&mut unicode_filename, 0, Some(root_handle), None);
 
     let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
     let mut handle = NtSafeHandle::from(INVALID_HANDLE_VALUE);
@@ -139,7 +151,7 @@ pub fn lfs_open_file<P: Into<PCWSTR>>(
     let result = NTSTATUS(unsafe {
         NtOpenFile(
             &mut handle.deref_mut().0,
-            0x00010000 | FILE_READ_ATTRIBUTES.0 | desired_access,
+            FILE_READ_ATTRIBUTES.0 | desired_access,
             &mut object_attrs,
             iosb.as_mut_ptr(),
             FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0,
@@ -154,7 +166,11 @@ pub fn lfs_open_file<P: Into<PCWSTR>>(
     }
 }
 
-pub fn lfs_read_file(handle: HANDLE, buffer: &mut [u8], offset: u64, out: &mut usize) -> NTSTATUS {
+pub fn lfs_read_file(
+    handle: HANDLE,
+    buffer: &mut [u8],
+    offset: u64,
+) -> winfsp::Result<u64> {
     LFS_EVENT.with(|event| {
         let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
         let mut offset = offset;
@@ -182,13 +198,20 @@ pub fn lfs_read_file(handle: HANDLE, buffer: &mut [u8], offset: u64, out: &mut u
         }
 
         let iosb = unsafe { iosb.assume_init() };
-        *out = iosb.Information;
 
-        result
+        if result.is_ok() {
+            Ok(iosb.Information as u64)
+        } else {
+            Err(result.into())
+        }
     })
 }
 
-pub fn lfs_write_file(handle: HANDLE, buffer: &[u8], offset: u64, out: &mut usize) -> NTSTATUS {
+pub fn lfs_write_file(
+    handle: HANDLE,
+    buffer: &[u8],
+    offset: u64,
+) -> winfsp::Result<u64> {
     LFS_EVENT.with(|event| {
         let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
         let mut offset = offset;
@@ -216,15 +239,104 @@ pub fn lfs_write_file(handle: HANDLE, buffer: &[u8], offset: u64, out: &mut usiz
         }
 
         let iosb = unsafe { iosb.assume_init() };
-        *out = iosb.Information;
-
-        result
+        if result.is_ok() {
+            Ok(iosb.Information as u64)
+        } else {
+            Err(result.into())
+        }
     })
 }
 
+pub fn lfs_query_file_attributes(handle: HANDLE) -> winfsp::Result<u32> {
+    let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
+    let mut file_attr_info = FILE_ATTRIBUTE_TAG_INFORMATION {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+
+    let result = unsafe {
+        NTSTATUS(nt::NtQueryInformationFile(
+            handle.0,
+            iosb.as_mut_ptr(),
+            &mut file_attr_info as *mut _ as *mut c_void,
+            size_of::<FILE_ATTRIBUTE_TAG_INFORMATION>() as u32,
+            FileAttributeTagInformation as i32, /*FileAttributeTagInformation*/
+        ))
+    };
+
+    if result.is_err() {
+        Err(result.into())
+    } else {
+        Ok(file_attr_info.FileAttributes)
+    }
+}
+
+pub fn lfs_query_security(
+    handle: HANDLE,
+    security_information: u32,
+    security_descriptor: PSECURITY_DESCRIPTOR,
+    security_descriptor_length: u32,
+) -> winfsp::Result<u32> {
+    let mut length_needed = 0;
+    let result = unsafe {
+        NTSTATUS(nt::NtQuerySecurityObject(
+            handle.0,
+            security_information,
+            security_descriptor.0,
+            security_descriptor_length,
+            &mut length_needed,
+        ))
+    };
+
+    if result.is_err() {
+        Err(result.into())
+    } else {
+        Ok(length_needed)
+    }
+}
+
+pub fn lfs_get_file_info(handle: HANDLE, root_prefix_length: u32, file_info: &mut FSP_FSCTL_FILE_INFO) -> winfsp::Result<()> {
+    let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
+    let mut file_all_info: VariableSizedBox<FILE_ALL_INFORMATION> =
+        VariableSizedBox::new(winfsp::filesystem::constants::FSP_FSCTL_TRANSACT_PATH_SIZEMAX as usize + size_of::<FILE_ALL_INFORMATION>() + 1);
+    let mut file_attr_info: FILE_ATTRIBUTE_TAG_INFORMATION = FILE_ATTRIBUTE_TAG_INFORMATION {
+        FileAttributes: 0,
+        ReparseTag: 0
+    };
+
+    let result = unsafe {
+        NTSTATUS(nt::NtQueryInformationFile(handle.0, iosb.as_mut_ptr(),
+                                            file_all_info.as_mut_ptr().cast(),
+                                            file_all_info.len() as u32, FileAllInformation as i32))
+    };
+
+    if result.is_err() && result != STATUS_BUFFER_OVERFLOW {
+        return Err(result.into())
+    }
+
+    todo!("rest of the fuckin owl");
+    Ok(())
+}
+
+pub fn lfs_fsize(handle: HANDLE) -> winfsp::Result<u64> {
+    let mut file_std_info: MaybeUninit<FILE_STANDARD_INFORMATION> = MaybeUninit::uninit();
+    let result = unsafe {
+        let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
+        NTSTATUS(NtQueryInformationFile(handle.0, iosb.as_mut_ptr(), file_std_info.as_mut_ptr().cast(), size_of::<FILE_STANDARD_INFORMATION>() as u32, FileStandardInformation as i32))
+    };
+
+    if result.is_ok() {
+        Ok(unsafe {
+            *file_std_info.assume_init().EndOfFile.QuadPart()
+        } as u64)
+    } else {
+        Err(result.into())
+    }
+}
+// todo: make these return winfsp
 pub fn lfs_unlink(handle: HANDLE, delete: bool) -> NTSTATUS {
     let mut iosb: MaybeUninit<IO_STATUS_BLOCK> = MaybeUninit::uninit();
-    let mut disp_info = FILE_DISPOSITION_INFO {
+    let mut disp_info = FILE_DISPOSITION_INFORMATION {
         DeleteFileA: if delete { 1u8 } else { 0u8 },
     };
 
@@ -241,7 +353,7 @@ pub fn lfs_unlink(handle: HANDLE, delete: bool) -> NTSTATUS {
             handle.0,
             iosb.as_mut_ptr(),
             &mut disp_info_ex,
-            64, /*FileDispositionInformationEx*/
+            FileDispositionInformationEx as i32, /*FileDispositionInformationEx*/
         ))
     };
 
@@ -256,7 +368,7 @@ pub fn lfs_unlink(handle: HANDLE, delete: bool) -> NTSTATUS {
                     handle.0,
                     iosb.as_mut_ptr(),
                     &mut disp_info,
-                    13, /*FileDispositionInformation*/
+                    FileDispositionInformation as i32, /*FileDispositionInformation*/
                 ))
             }
         }

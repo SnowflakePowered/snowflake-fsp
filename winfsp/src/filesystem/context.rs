@@ -262,11 +262,11 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
     /// The current operation context is stored in thread local storage.
     unsafe fn with_operation_response<T, F>(&self, f: F) -> Option<T>
     where
-        F: FnOnce(&FSP_FSCTL_TRANSACT_RSP) -> T,
+        F: FnOnce(&mut FSP_FSCTL_TRANSACT_RSP) -> T,
     {
         unsafe {
             if let Some(context) = winfsp_sys::FspFileSystemGetOperationContext().as_ref() {
-                if let Some(response) = context.Response.as_ref() {
+                if let Some(response) = context.Response.as_mut() {
                     return Some(f(response));
                 }
             }
