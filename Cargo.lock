@@ -346,7 +346,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "ntptfs-winfsp-rs",
  "widestring",
  "windows",
  "winfsp",
