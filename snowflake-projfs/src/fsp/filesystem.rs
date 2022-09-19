@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::mem::MaybeUninit;
 
 use std::ops::{BitXor, Deref, DerefMut};
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
 use std::path::Component::Prefix;
@@ -57,6 +58,7 @@ use winfsp::filesystem::{
     FSP_FSCTL_VOLUME_INFO,
 };
 use winfsp::util::{NtSafeHandle, Win32SafeHandle};
+use winfsp::WCStr;
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
 use crate::fsp::lfs::{
@@ -443,13 +445,15 @@ impl ProjFsContext {
 impl FileSystemContext for ProjFsContext {
     type FileContext = ProjFsFileContext;
 
-    fn get_security_by_name<P: AsRef<OsStr>>(
+    fn get_security_by_name<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         security_descriptor: PSECURITY_DESCRIPTOR,
         descriptor_len: Option<u64>,
     ) -> winfsp::Result<FileSecurity> {
-        if file_name.as_ref() == "\\" {
+        let file_name = OsString::from_wide(file_name.as_ref().as_slice());
+
+        if file_name == "\\" {
             return Ok(FileSecurity {
                 attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
                 reparse: false,
@@ -459,7 +463,7 @@ impl FileSystemContext for ProjFsContext {
 
         if let Some((entry, remainder)) = self
             .projections
-            .search_entry_case_insensitive(file_name.as_ref())
+            .search_entry_case_insensitive(file_name.as_os_str())
         {
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, .. }, _)
@@ -505,14 +509,15 @@ impl FileSystemContext for ProjFsContext {
         Err(ERROR_FILE_NOT_FOUND.into())
     }
 
-    fn open<P: AsRef<OsStr>>(
+    fn open<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         create_options: u32,
         granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
-        if file_name.as_ref() == "\\" {
+        let file_name = OsString::from_wide(file_name.as_ref().as_slice());
+        if file_name == "\\" {
             let context = Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
                 dir_buffer: Default::default(),
@@ -523,7 +528,7 @@ impl FileSystemContext for ProjFsContext {
 
         if let Some((entry, remainder)) = self
             .projections
-            .search_entry_case_insensitive(file_name.as_ref())
+            .search_entry_case_insensitive(file_name.as_os_str())
         {
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, access, .. }, _)
@@ -623,7 +628,7 @@ impl FileSystemContext for ProjFsContext {
         drop(context)
     }
 
-    fn create<P: AsRef<OsStr>>(
+    fn create<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         create_options: u32,
@@ -635,7 +640,8 @@ impl FileSystemContext for ProjFsContext {
         _extra_buffer_is_reparse_point: bool,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
-        let new_path = Path::new(file_name.as_ref());
+        let file_name = OsString::from_wide(file_name.as_ref().as_slice());
+        let new_path = Path::new(file_name.as_os_str());
 
         let parent = new_path.parent().ok_or(STATUS_OBJECT_NAME_INVALID)?;
         let new_filename = new_path.file_name().ok_or(STATUS_OBJECT_NAME_INVALID)?;
@@ -681,7 +687,7 @@ impl FileSystemContext for ProjFsContext {
                 entry => {
                     // todo: allow 'create' under certain circumstances
                     // create error: Directory { name: OwnedProjectedPath("/") } (original: "\\wiiu"), opts: 2200021, access: FILE_ACCESS_FLAGS(1048577), flags: FILE_FLAGS_AND_ATTRIBUTES(16)
-                    eprintln!("create error: {:?} (original: {:?}), opts: {:x}, access: {:?}, flags: {:?}", entry, file_name.as_ref(), create_options, granted_access, file_attributes);
+                    eprintln!("create error: {:?} (original: {:?}), opts: {:x}, access: {:?}, flags: {:?}", entry, file_name, create_options, granted_access, file_attributes);
                     Err(ERROR_ACCESS_DENIED.into())
                 }
             };
@@ -691,7 +697,7 @@ impl FileSystemContext for ProjFsContext {
         Err(ERROR_ACCESS_DENIED.into())
     }
 
-    fn rename<P: AsRef<OsStr>>(
+    fn rename<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         _file_name: P,
@@ -704,11 +710,13 @@ impl FileSystemContext for ProjFsContext {
             handle,
         } = &context.handle
         {
+            let new_file_name = OsString::from_wide(new_file_name.as_ref().as_slice());
+
             // WinFSP treats filenames as case-insensitive and gives us an uppercase name.
             // We need to resolve it against the case-sensitive projections.
             let target_portal = self
                 .projections
-                .search_entry_case_insensitive(Path::new(new_file_name.as_ref()));
+                .search_entry_case_insensitive(Path::new(new_file_name.as_os_str()));
             let source_portal = self.projections.get_entry(portal);
             eprintln!("rn: tp {:?}", target_portal);
             eprintln!("rn: sp {:?}", source_portal);
@@ -879,7 +887,7 @@ impl FileSystemContext for ProjFsContext {
         });
     }
 
-    fn read_directory<P: Into<PCWSTR>>(
+    fn read_directory<P: AsRef<WCStr>>(
         &self,
         context: &mut Self::FileContext,
         _pattern: Option<P>,
@@ -1178,14 +1186,13 @@ impl FileSystemContext for ProjFsContext {
         self.get_file_info_internal(context, file_info)
     }
 
-    fn set_delete<P: AsRef<OsStr>>(
+    fn set_delete<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
         delete_file: bool,
     ) -> winfsp::Result<()> {
         // only allow delete of real files.
-        eprintln!("del: {:?}", file_name.as_ref());
         if let ProjectedHandle::Real { handle, .. } = &context.handle {
             let result = lfs_unlink(*handle.deref(), delete_file);
             if result.is_ok() {
@@ -1198,7 +1205,7 @@ impl FileSystemContext for ProjFsContext {
         }
     }
 
-    fn cleanup<P: AsRef<OsStr>>(
+    fn cleanup<P: AsRef<WCStr>>(
         &self,
         context: &mut Self::FileContext,
         _file_name: Option<P>,
