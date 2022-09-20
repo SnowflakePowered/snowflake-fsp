@@ -4,11 +4,7 @@ use std::os::windows::ffi::OsStrExt;
 
 use widestring::{u16cstr, U16CStr};
 use windows::Win32::Foundation::{STATUS_INSUFFICIENT_RESOURCES, STATUS_SUCCESS};
-use winfsp_sys::{
-    FspFileSystemAcquireDirectoryBufferEx, FspFileSystemDeleteDirectoryBuffer,
-    FspFileSystemFillDirectoryBuffer, FspFileSystemReadDirectoryBuffer,
-    FspFileSystemReleaseDirectoryBuffer, FSP_FSCTL_FILE_INFO, PVOID,
-};
+use winfsp_sys::{FspFileSystemAcquireDirectoryBufferEx, FspFileSystemDeleteDirectoryBuffer, FspFileSystemFillDirectoryBuffer, FspFileSystemReadDirectoryBuffer, FspFileSystemReleaseDirectoryBuffer, FSP_FSCTL_FILE_INFO, PVOID, FspFileSystemAddDirInfo};
 
 use crate::error::Result;
 use crate::WCStr;
@@ -107,6 +103,7 @@ impl DirBufferLock<'_> {
     ///
     /// A buffer can accept multiple DirInfos of varying sizes.
     pub fn write<const D: usize>(&mut self, dir_info: &mut DirInfo<D>) -> Result<()> {
+        // todo: use adddirinfo
         let mut status = STATUS_SUCCESS;
         unsafe {
             let buffer = &mut self.0;
