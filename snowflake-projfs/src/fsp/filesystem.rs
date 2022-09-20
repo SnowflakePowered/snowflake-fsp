@@ -2,33 +2,44 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::OpenOptions;
 
-use std::ops::{BitXor, Deref, DerefMut};
+use std::ops::{BitXor, Deref};
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
-use widestring::{U16CStr, U16Str, U16String};
+use widestring::{U16Str, U16String};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, BOOLEAN, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
-    ERROR_FILE_OFFLINE, ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
+    GetLastError, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND, ERROR_FILE_OFFLINE,
+    ERROR_INVALID_NAME, HANDLE, MAX_PATH, STATUS_OBJECT_NAME_INVALID,
 };
 
 use windows::Win32::Security::{
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
-use windows::Win32::Storage::FileSystem::{CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileEndOfFileInfo, FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx, GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_INFO, FILE_END_OF_FILE_INFO, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING, READ_CONTROL, FILE_OPEN_IF, FILE_CREATION_DISPOSITION};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FileAllocationInfo, FileBasicInfo, FileDispositionInfoEx, FileEndOfFileInfo,
+    FlushFileBuffers, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
+    GetFinalPathNameByHandleW, MoveFileExW, ReadFile, SetFileInformationByHandle, WriteFile,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ACCESS_FLAGS, FILE_ALLOCATION_INFO,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE,
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_END_OF_FILE_INFO,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+    FILE_FLAG_POSIX_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS, OPEN_EXISTING,
+    READ_CONTROL,
+};
 use windows::Win32::System::WindowsProgramming::{
     FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_DO_NOT_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX,
+    FILE_DISPOSITION_FLAG_DO_NOT_DELETE, FILE_DISPOSITION_INFO_EX,
 };
 use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 
-use snowflake_projfs_common::path::{OwnedProjectedPath, ProjectedPath};
+use snowflake_projfs_common::path::OwnedProjectedPath;
 use snowflake_projfs_common::projections::{FileAccess, Projection, ProjectionEntry};
 use winfsp::error::FspError;
 use winfsp::filesystem::constants::FspCleanupFlags;
@@ -466,9 +477,10 @@ impl FileSystemContext for ProjFsContext {
             return match entry {
                 ProjectionEntry::Portal { source, name, .. } => {
                     // true parent
-                    let parent = remainder
-                        .map_or_else(|| source.clone().into_os_string(),
-                                     |remainder| join_remainder_windows_semantics(source, remainder));
+                    let parent = remainder.map_or_else(
+                        || source.clone().into_os_string(),
+                        |remainder| join_remainder_windows_semantics(source, remainder),
+                    );
                     let target_path = join_remainder_windows_semantics(parent, new_filename);
                     if target_path.as_os_str().len() > FULLPATH_SIZE {
                         return Err(STATUS_OBJECT_NAME_INVALID.into());
@@ -567,8 +579,8 @@ impl FileSystemContext for ProjFsContext {
                 }
 
                 if let Some(source_path) = &context.handle.get_real_path() {
-                    let target_path = join_remainder_windows_semantics(source,
-                                                                       target_remainder.unwrap());
+                    let target_path =
+                        join_remainder_windows_semantics(source, target_remainder.unwrap());
 
                     eprintln!("mv: source {:?}", source_path);
                     eprintln!("mv: target {:?}", target_path);
@@ -600,17 +612,17 @@ impl FileSystemContext for ProjFsContext {
     ) -> winfsp::Result<()> {
         if let Some(context) = context {
             require_handle!(&context.handle, handle => {
-             if *handle.deref() == HANDLE(0) {
-                // we do not flush the whole volume, so just return ok
-                return Ok(());
-            }
-            win32_try!(unsafe FlushFileBuffers(*handle.deref()));
-        });
+                 if *handle.deref() == HANDLE(0) {
+                    // we do not flush the whole volume, so just return ok
+                    return Ok(());
+                }
+                win32_try!(unsafe FlushFileBuffers(*handle.deref()));
+            });
 
             // it's fine if we also refresh data for virtdirs
             self.get_file_info_internal(context, file_info)
         } else {
-            return Ok(())
+            Ok(())
         }
     }
 
