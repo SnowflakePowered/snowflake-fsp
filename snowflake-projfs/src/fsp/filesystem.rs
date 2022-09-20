@@ -3,12 +3,13 @@ use std::fs;
 use std::fs::OpenOptions;
 
 use std::ops::{BitXor, Deref, DerefMut};
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::IntoRawHandle;
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
-use widestring::{U16Str, U16String};
+use widestring::{U16CStr, U16Str, U16String};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{
     GetLastError, BOOLEAN, ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
@@ -35,7 +36,8 @@ use winfsp::filesystem::{
     DirBuffer, DirInfo, DirMarker, FileSecurity, FileSystemContext, IoResult, FSP_FSCTL_FILE_INFO,
     FSP_FSCTL_VOLUME_INFO,
 };
-use winfsp::util::SafeDropHandle;
+use winfsp::util::Win32SafeHandle;
+use winfsp::WCStr;
 
 use crate::fsp::host::{ALLOCATION_UNIT, FULLPATH_SIZE, VOLUME_LABEL};
 use crate::fsp::util::{quadpart_to_u64, systemtime_to_filetime, win32_try};
@@ -81,11 +83,11 @@ pub struct ProjFsContext {
 enum ProjectedHandle {
     /// A real file opened under a portal.
     Real {
-        handle: SafeDropHandle,
+        handle: Win32SafeHandle,
         portal: OwnedProjectedPath,
     },
     /// A projected file or directory that points to a real filesystem entry.
-    Projected(SafeDropHandle),
+    Projected(Win32SafeHandle),
     /// A directory with a canonical path in the projection tree.
     Directory(OwnedProjectedPath),
 }
@@ -217,7 +219,7 @@ impl ProjFsContext {
 
         let f = opt.open(path)?;
         let metadata = f.metadata()?;
-        let handle = SafeDropHandle::from(HANDLE(f.into_raw_handle() as isize));
+        let handle = Win32SafeHandle::from(HANDLE(f.into_raw_handle() as isize));
 
         let mut len_needed = 0;
         if let Some(descriptor_len) = descriptor_len {
@@ -281,13 +283,14 @@ impl ProjFsContext {
 impl FileSystemContext for ProjFsContext {
     type FileContext = ProjFsFileContext;
 
-    fn get_security_by_name<P: AsRef<OsStr>>(
+    fn get_security_by_name<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         security_descriptor: PSECURITY_DESCRIPTOR,
         descriptor_len: Option<u64>,
     ) -> winfsp::Result<FileSecurity> {
-        if file_name.as_ref() == "\\" {
+        let file_name = OsString::from_wide(file_name.as_ref().as_slice());
+        if file_name.as_os_str() == "\\" {
             return Ok(FileSecurity {
                 attributes: FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_READONLY.0,
                 reparse: false,
@@ -297,7 +300,7 @@ impl FileSystemContext for ProjFsContext {
 
         if let Some((entry, remainder)) = self
             .projections
-            .search_entry_case_insensitive(file_name.as_ref())
+            .search_entry_case_insensitive(file_name.as_os_str())
         {
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, .. }, _)
@@ -343,15 +346,15 @@ impl FileSystemContext for ProjFsContext {
         Err(ERROR_FILE_NOT_FOUND.into())
     }
 
-    fn open<P: AsRef<OsStr>>(
+    fn open<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         create_options: u32,
         granted_access: FILE_ACCESS_FLAGS,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
-
-        if file_name.as_ref() == "\\" {
+        let file_name = OsString::from_wide(file_name.as_ref().as_slice());
+        if file_name.as_os_str() == "\\" {
             let context = Self::FileContext {
                 handle: ProjectedHandle::Directory(OwnedProjectedPath::root()),
                 dir_buffer: Default::default(),
@@ -362,7 +365,7 @@ impl FileSystemContext for ProjFsContext {
 
         if let Some((entry, remainder)) = self
             .projections
-            .search_entry_case_insensitive(file_name.as_ref())
+            .search_entry_case_insensitive(file_name.as_os_str())
         {
             return match (entry, remainder) {
                 (ProjectionEntry::File { source, access, .. }, _)
@@ -380,7 +383,7 @@ impl FileSystemContext for ProjFsContext {
                         *access,
                     )?;
                     let context = Self::FileContext {
-                        handle: ProjectedHandle::Projected(SafeDropHandle::from(handle)),
+                        handle: ProjectedHandle::Projected(Win32SafeHandle::from(handle)),
                         dir_buffer: Default::default(),
                     };
 
@@ -423,7 +426,7 @@ impl FileSystemContext for ProjFsContext {
                     )?;
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Real {
-                            handle: SafeDropHandle::from(handle),
+                            handle: Win32SafeHandle::from(handle),
                             portal: name.clone(),
                         },
                         dir_buffer: Default::default(),
@@ -440,7 +443,7 @@ impl FileSystemContext for ProjFsContext {
 
     fn close(&self, _context: Self::FileContext) {}
 
-    fn create<P: AsRef<OsStr>>(
+    fn create<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         create_options: u32,
@@ -452,7 +455,8 @@ impl FileSystemContext for ProjFsContext {
         _extra_buffer_is_reparse_point: bool,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<Self::FileContext> {
-        let new_path = Path::new(file_name.as_ref());
+        let file_name = OsString::from_wide(file_name.as_ref().as_slice());
+        let new_path = Path::new(file_name.as_os_str());
 
         let parent = new_path.parent().ok_or(STATUS_OBJECT_NAME_INVALID)?;
         let new_filename = new_path.file_name().ok_or(STATUS_OBJECT_NAME_INVALID)?;
@@ -512,7 +516,7 @@ impl FileSystemContext for ProjFsContext {
 
                     let context = Self::FileContext {
                         handle: ProjectedHandle::Real {
-                            handle: SafeDropHandle::from(handle),
+                            handle: Win32SafeHandle::from(handle),
                             portal: name.clone(),
                         },
                         dir_buffer: Default::default(),
@@ -529,19 +533,21 @@ impl FileSystemContext for ProjFsContext {
         Err(ERROR_ACCESS_DENIED.into())
     }
 
-    fn rename<P: AsRef<OsStr>>(
+    fn rename<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         _file_name: P,
         new_file_name: P,
         replace_if_exists: bool,
     ) -> winfsp::Result<()> {
+        let new_file_name = OsString::from_wide(new_file_name.as_ref().as_slice());
+
         if let ProjectedHandle::Real { portal, .. } = &context.handle {
             // WinFSP treats filenames as case-insensitive and gives us an uppercase name.
             // We need to resolve it against the case-sensitive projections.
             let target_portal = self
                 .projections
-                .search_entry_case_insensitive(Path::new(new_file_name.as_ref()));
+                .search_entry_case_insensitive(Path::new(new_file_name.as_os_str()));
             let source_portal = self.projections.get_entry(portal);
             eprintln!("rn: tp {:?}", target_portal);
             eprintln!("rn: sp {:?}", source_portal);
@@ -589,10 +595,11 @@ impl FileSystemContext for ProjFsContext {
 
     fn flush(
         &self,
-        context: &Self::FileContext,
+        context: Option<&Self::FileContext>,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> winfsp::Result<()> {
-        require_handle!(&context.handle, handle => {
+        if let Some(context) = context {
+            require_handle!(&context.handle, handle => {
              if *handle.deref() == HANDLE(0) {
                 // we do not flush the whole volume, so just return ok
                 return Ok(());
@@ -600,8 +607,11 @@ impl FileSystemContext for ProjFsContext {
             win32_try!(unsafe FlushFileBuffers(*handle.deref()));
         });
 
-        // it's fine if we also refresh data for virtdirs
-        self.get_file_info_internal(context, file_info)
+            // it's fine if we also refresh data for virtdirs
+            self.get_file_info_internal(context, file_info)
+        } else {
+            return Ok(())
+        }
     }
 
     fn get_file_info(
@@ -685,14 +695,13 @@ impl FileSystemContext for ProjFsContext {
         })
     }
 
-    fn read_directory<P: Into<PCWSTR>>(
+    fn read_directory<P: AsRef<WCStr>>(
         &self,
         context: &mut Self::FileContext,
         _pattern: Option<P>,
         mut marker: DirMarker,
         buffer: &mut [u8],
     ) -> winfsp::Result<u32> {
-        // todo: fix double slash semantics
         if let Ok(mut buffer) = context.dir_buffer.acquire(marker.is_none(), None) {
             let mut dirinfo = DirInfo::<{ MAX_PATH as usize }>::new();
             require_handle!(&context.handle, handle => {
@@ -1011,7 +1020,7 @@ impl FileSystemContext for ProjFsContext {
         self.get_file_info_internal(context, file_info)
     }
 
-    fn set_delete<P: AsRef<OsStr>>(
+    fn set_delete<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
@@ -1038,7 +1047,7 @@ impl FileSystemContext for ProjFsContext {
         }
     }
 
-    fn cleanup<P: AsRef<OsStr>>(
+    fn cleanup<P: AsRef<WCStr>>(
         &self,
         context: &mut Self::FileContext,
         _file_name: Option<P>,
