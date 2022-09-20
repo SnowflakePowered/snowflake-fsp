@@ -1,20 +1,24 @@
+use crate::WCStr;
 use crate::error::Result;
 use crate::filesystem::{DirInfo, DirMarker};
-use std::ffi::OsStr;
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::STATUS_INVALID_DEVICE_REQUEST;
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::Storage::FileSystem::{FILE_ACCESS_FLAGS, FILE_FLAGS_AND_ATTRIBUTES};
 
-pub use winfsp_sys::{FSP_FSCTL_FILE_INFO, FSP_FSCTL_VOLUME_INFO, FSP_FSCTL_VOLUME_PARAMS};
+use winfsp_sys::{
+    FSP_FSCTL_FILE_INFO, FSP_FSCTL_TRANSACT_REQ, FSP_FSCTL_TRANSACT_RSP, FSP_FSCTL_VOLUME_INFO,
+};
 
+#[derive(Debug)]
 pub struct FileSecurity {
     pub reparse: bool,
     pub sz_security_descriptor: u64,
     pub attributes: u32,
 }
 
+#[derive(Debug)]
 pub struct IoResult {
     pub bytes_transferred: u32,
     pub io_pending: bool,
@@ -25,14 +29,14 @@ pub const MAX_PATH: usize = 260;
 #[allow(unused_variables)]
 pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
     type FileContext: Sized;
-    fn get_security_by_name<P: AsRef<OsStr>>(
+    fn get_security_by_name<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         security_descriptor: PSECURITY_DESCRIPTOR,
         descriptor_len: Option<u64>,
     ) -> Result<FileSecurity>;
 
-    fn open<P: AsRef<OsStr>>(
+    fn open<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         create_options: u32,
@@ -42,7 +46,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
 
     fn close(&self, context: Self::FileContext);
 
-    fn cleanup<P: AsRef<OsStr>>(
+    fn cleanup<P: AsRef<WCStr>>(
         &self,
         context: &mut Self::FileContext,
         file_name: Option<P>,
@@ -61,7 +65,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn create<P: AsRef<OsStr>>(
+    fn create<P: AsRef<WCStr>>(
         &self,
         file_name: P,
         create_options: u32,
@@ -76,7 +80,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
     }
 
-    fn delete_reparse_point<P: AsRef<OsStr>>(
+    fn delete_reparse_point<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
@@ -87,7 +91,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
 
     fn flush(
         &self,
-        context: &Self::FileContext,
+        context: Option<&Self::FileContext>,
         file_info: &mut FSP_FSCTL_FILE_INFO,
     ) -> Result<()> {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
@@ -139,7 +143,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
     }
 
-    fn read_directory<P: Into<PCWSTR>>(
+    fn read_directory<P: AsRef<WCStr>>(
         &self,
         context: &mut Self::FileContext,
         pattern: Option<P>,
@@ -149,7 +153,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
     }
 
-    fn rename<P: AsRef<OsStr>>(
+    fn rename<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
@@ -173,7 +177,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
     }
 
-    fn set_delete<P: AsRef<OsStr>>(
+    fn set_delete<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
@@ -221,7 +225,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
     }
 
-    fn get_dir_info_by_name<P: AsRef<OsStr>>(
+    fn get_dir_info_by_name<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
@@ -232,7 +236,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
     }
 
     #[cfg(feature = "reparse_points")]
-    fn get_reparse_point<P: AsRef<OsStr>>(
+    fn get_reparse_point<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
@@ -242,7 +246,7 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
     }
 
     #[cfg(feature = "reparse_points")]
-    fn set_reparse_point<P: AsRef<OsStr>>(
+    fn set_reparse_point<P: AsRef<WCStr>>(
         &self,
         context: &Self::FileContext,
         file_name: P,
@@ -251,4 +255,42 @@ pub trait FileSystemContext<const DIR_INFO_SIZE: usize = MAX_PATH>: Sized {
         Err(STATUS_INVALID_DEVICE_REQUEST.into())
     }
     // todo: figure out extended attributes safely
+
+    /// Get the context response of the current FSP interface operation.
+    ///
+    /// ## Safety
+    /// This function may be used only when servicing one of the FSP_FILE_SYSTEM_INTERFACE operations.
+    /// The current operation context is stored in thread local storage.
+    unsafe fn with_operation_response<T, F>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&mut FSP_FSCTL_TRANSACT_RSP) -> T,
+    {
+        unsafe {
+            if let Some(context) = winfsp_sys::FspFileSystemGetOperationContext().as_ref() {
+                if let Some(response) = context.Response.as_mut() {
+                    return Some(f(response));
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the context request of the current FSP interface operation.
+    ///
+    /// ## Safety
+    /// This function may be used only when servicing one of the FSP_FILE_SYSTEM_INTERFACE operations.
+    /// The current operation context is stored in thread local storage.
+    unsafe fn with_operation_request<T, F>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&FSP_FSCTL_TRANSACT_REQ) -> T,
+    {
+        unsafe {
+            if let Some(context) = winfsp_sys::FspFileSystemGetOperationContext().as_ref() {
+                if let Some(request) = context.Request.as_ref() {
+                    return Some(f(request));
+                }
+            }
+        }
+        None
+    }
 }

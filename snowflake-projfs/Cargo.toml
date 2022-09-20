@@ -7,7 +7,8 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "3.2", features = ["derive"] }
-windows = { version = "0.39.0", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_WindowsProgramming", "Win32_System_Console", "Win32_System_IO", "Win32_System_Time", "Win32_Security_Authorization"] }
+windows = { version = "0.39.0", features = ["Win32_Foundation", "Win32_System_WindowsProgramming", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Time", "Win32_Security_Authorization"] }
+windows-sys = { version = "0.36.1", features = ["Win32_Foundation", "Win32_System_WindowsProgramming", "Win32_Storage_FileSystem"] }
 widestring = "1"
 winfsp = { path = "../winfsp", features = ["debug"] }
 anyhow = "1"
@@ -16,5 +17,6 @@ time = "0.3.14"
 snowflake-projfs-common = { path = "../snowflake-projfs-common" }
 snowflake-projfs-fsp = { path = "../snowflake-projfs-fsp" }
 
+memoffset = { version = "0.6.5", features = ["unstable_const"]}
 [build-dependencies]
 winfsp = { path = "../winfsp" }

@@ -1,11 +1,10 @@
 #![feature(io_error_more)]
 #![feature(let_chains)]
-#![feature(const_ptr_offset_from, const_refs_to_cell)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-extern crate core;
-
-mod fsp;
+pub mod fs;
+mod native;
+mod service;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -42,13 +41,13 @@ fn main() {
     let fsp = FileSystemServiceBuilder::new()
         .with_start(|| {
             let args = Args::parse();
-            fsp::service::svc_start(args).map_err(|_e| STATUS_NONCONTINUABLE_EXCEPTION)
+            service::svc_start(args).map_err(|_e| STATUS_NONCONTINUABLE_EXCEPTION)
         })
         .with_stop(|f| {
-            fsp::service::svc_stop(f);
+            service::svc_stop(f);
             Ok(())
         })
-        .build(w!("snowflake-projfs-fsp"), init)
+        .build(w!("ntptfs-winfsp-rs"), init)
         .expect("failed to build fsp");
 
     fsp.start();

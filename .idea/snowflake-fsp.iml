@@ -9,6 +9,7 @@
       <sourceFolder url="file://$MODULE_DIR$/snowflake-projfs-common/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/snowflake-projfs-fsp/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/snowflake-projfs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/ntptfs-winfsp-rs/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
